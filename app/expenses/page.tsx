@@ -206,6 +206,23 @@ export default function ExpensesPage() {
 
     const [categories, setCategories] = useState<string[]>(['Others'])
 
+    // Lock background scroll when any modal is open (mobile-friendly)
+    useEffect(() => {
+        const anyModalOpen = addOpen || editOpen || deleteOpen
+        if (!anyModalOpen) return
+
+        const prevOverflow = document.body.style.overflow
+        const prevTouchAction = (document.body.style as any).touchAction
+
+        document.body.style.overflow = 'hidden'
+        ;(document.body.style as any).touchAction = 'none'
+
+        return () => {
+            document.body.style.overflow = prevOverflow
+            ;(document.body.style as any).touchAction = prevTouchAction
+        }
+    }, [addOpen, editOpen, deleteOpen])
+
     // --- Computed Logic ---
     const monthLabel =
         yearIsAll
@@ -977,10 +994,10 @@ export default function ExpensesPage() {
                         />
 
                         {/* Card */}
-                        <div className="relative w-full max-w-sm sm:max-w-md bg-white rounded-[2.5rem] shadow-2xl p-5 sm:p-6 animate-in zoom-in-95 duration-200">
+                        <div className="relative w-full max-w-sm sm:max-w-md bg-white rounded-[2.5rem] shadow-2xl p-5 sm:p-6 animate-in zoom-in-95 duration-200 max-h-[85vh] flex flex-col">
 
                             {/* Modal Header */}
-                            <div className="flex justify-between items-center mb-6 pl-1">
+                            <div className="flex justify-between items-center mb-4 pl-1 flex-shrink-0">
                                 <div>
                                     <h3 className="text-2xl font-black text-stone-700">Add Expense ✨</h3>
                                     <p className="text-xs font-bold text-stone-400">What did you buy today?</p>
@@ -994,7 +1011,7 @@ export default function ExpensesPage() {
                             </div>
 
                             {/* Form Fields */}
-                            <div className="space-y-4">
+                            <div className="space-y-4 flex-1 overflow-y-auto overscroll-contain pr-1">
                                 <CuteInput
                                     label="Amount (RM)"
                                     value={addAmount}
@@ -1091,9 +1108,9 @@ export default function ExpensesPage() {
                         />
 
                         {/* Card */}
-                        <div className="relative w-full max-w-sm sm:max-w-md bg-white rounded-[2.5rem] shadow-2xl p-5 sm:p-6 animate-in zoom-in-95 duration-200">
+                        <div className="relative w-full max-w-sm sm:max-w-md bg-white rounded-[2.5rem] shadow-2xl p-5 sm:p-6 animate-in zoom-in-95 duration-200 max-h-[85vh] flex flex-col">
                             {/* Modal Header */}
-                            <div className="flex justify-between items-center mb-6 pl-1">
+                            <div className="flex justify-between items-center mb-4 pl-1 flex-shrink-0">
                                 <div>
                                     <h3 className="text-2xl font-black text-stone-700">Edit Expense ✏️</h3>
                                     <p className="text-xs font-bold text-stone-400">Update the details</p>
@@ -1107,7 +1124,7 @@ export default function ExpensesPage() {
                             </div>
 
                             {/* Form Fields */}
-                            <div className="space-y-4">
+                            <div className="space-y-4 flex-1 overflow-y-auto overscroll-contain pr-1">
                                 <CuteInput
                                     label="Amount (RM)"
                                     value={editAmount}

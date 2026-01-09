@@ -59,7 +59,7 @@ function CuteInput({ label, value, onChange, placeholder, type = "text", inputMo
                 value={value}
                 onChange={onChange}
                 placeholder={placeholder}
-                className="w-full bg-white border-2 border-stone-100 rounded-2xl px-4 py-3 font-bold text-stone-700 focus:outline-none focus:border-rose-300 focus:ring-4 focus:ring-rose-100 transition-all placeholder:text-stone-300 shadow-sm"
+                className="w-full min-w-0 bg-white border-2 border-stone-100 rounded-2xl px-4 py-3 font-bold text-stone-700 focus:outline-none focus:border-rose-300 focus:ring-4 focus:ring-rose-100 transition-all placeholder:text-stone-300 shadow-sm text-sm"
             />
         </div>
     )
@@ -977,7 +977,7 @@ export default function ExpensesPage() {
                         />
 
                         {/* Card */}
-                        <div className="relative w-full max-w-md bg-white rounded-[2.5rem] shadow-2xl p-6 animate-in zoom-in-95 duration-200">
+                        <div className="relative w-full max-w-sm sm:max-w-md bg-white rounded-[2.5rem] shadow-2xl p-5 sm:p-6 animate-in zoom-in-95 duration-200">
 
                             {/* Modal Header */}
                             <div className="flex justify-between items-center mb-6 pl-1">
@@ -1004,11 +1004,23 @@ export default function ExpensesPage() {
                                     type="number"
                                 />
 
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 min-w-0">
                                     <CuteSelect label="Category" value={addCategory} onChange={(e: any) => setAddCategory(e.target.value)}>
                                         {categories.map((c) => <option key={c} value={c}>{c}</option>)}
                                     </CuteSelect>
-                                    <div className="sm:max-w-[180px]">
+                                    {/* Conditional Input for 'Others' */}
+                                    {addCategory === 'Others' && (
+                                        <div className="animate-in slide-in-from-top-2 duration-200">
+                                            <CuteInput
+                                                label="New Category Name"
+                                                value={addNewCategory}
+                                                onChange={(e: any) => setAddNewCategory(e.target.value)}
+                                                placeholder="e.g. Bubble Tea"
+                                            />
+                                        </div>
+                                    )}
+
+                                    <div className="w-full min-w-0 overflow-hidden">
                                         <CuteInput
                                             label="Date"
                                             type="date"
@@ -1017,18 +1029,6 @@ export default function ExpensesPage() {
                                         />
                                     </div>
                                 </div>
-
-                                {/* Conditional Input for 'Others' */}
-                                {addCategory === 'Others' && (
-                                    <div className="animate-in slide-in-from-top-2 duration-200">
-                                        <CuteInput
-                                            label="New Category Name"
-                                            value={addNewCategory}
-                                            onChange={(e: any) => setAddNewCategory(e.target.value)}
-                                            placeholder="e.g. Bubble Tea"
-                                        />
-                                    </div>
-                                )}
 
                                 {/* New toggles */}
                                 <div className="grid grid-cols-1 gap-3">
@@ -1091,7 +1091,7 @@ export default function ExpensesPage() {
                         />
 
                         {/* Card */}
-                        <div className="relative w-full max-w-md bg-white rounded-[2.5rem] shadow-2xl p-6 animate-in zoom-in-95 duration-200">
+                        <div className="relative w-full max-w-sm sm:max-w-md bg-white rounded-[2.5rem] shadow-2xl p-5 sm:p-6 animate-in zoom-in-95 duration-200">
                             {/* Modal Header */}
                             <div className="flex justify-between items-center mb-6 pl-1">
                                 <div>
@@ -1117,11 +1117,22 @@ export default function ExpensesPage() {
                                     type="number"
                                 />
 
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 min-w-0">
                                     <CuteSelect label="Category" value={editCategory} onChange={(e: any) => setEditCategory(e.target.value)}>
                                         {categories.map((c) => <option key={c} value={c}>{c}</option>)}
                                     </CuteSelect>
-                                    <div className="sm:max-w-[180px]">
+                                    {/* Conditional Input for 'Others' */}
+                                    {editCategory === 'Others' && (
+                                        <div className="animate-in slide-in-from-top-2 duration-200">
+                                            <CuteInput
+                                                label="New Category Name"
+                                                value={editNewCategory}
+                                                onChange={(e: any) => setEditNewCategory(e.target.value)}
+                                                placeholder="e.g. Bubble Tea"
+                                            />
+                                        </div>
+                                    )}
+                                    <div className="w-full min-w-0 overflow-hidden">
                                         <CuteInput
                                             label="Date"
                                             type="date"
@@ -1130,18 +1141,6 @@ export default function ExpensesPage() {
                                         />
                                     </div>
                                 </div>
-
-                                {/* Conditional Input for 'Others' */}
-                                {editCategory === 'Others' && (
-                                    <div className="animate-in slide-in-from-top-2 duration-200">
-                                        <CuteInput
-                                            label="New Category Name"
-                                            value={editNewCategory}
-                                            onChange={(e: any) => setEditNewCategory(e.target.value)}
-                                            placeholder="e.g. Bubble Tea"
-                                        />
-                                    </div>
-                                )}
 
                                 {/* Toggles */}
                                 <div className="grid grid-cols-1 gap-3">

@@ -1004,17 +1004,18 @@ export default function ExpensesPage() {
                                     type="number"
                                 />
 
-                                <div className="grid grid-cols-2 gap-4">
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                     <CuteSelect label="Category" value={addCategory} onChange={(e: any) => setAddCategory(e.target.value)}>
                                         {categories.map((c) => <option key={c} value={c}>{c}</option>)}
                                     </CuteSelect>
-
-                                    <CuteInput
-                                        label="Date"
-                                        type="date"
-                                        value={addDate}
-                                        onChange={(e: any) => setAddDate(e.target.value)}
-                                    />
+                                    <div className="sm:max-w-[180px]">
+                                        <CuteInput
+                                            label="Date"
+                                            type="date"
+                                            value={addDate}
+                                            onChange={(e: any) => setAddDate(e.target.value)}
+                                        />
+                                    </div>
                                 </div>
 
                                 {/* Conditional Input for 'Others' */}
@@ -1116,17 +1117,18 @@ export default function ExpensesPage() {
                                     type="number"
                                 />
 
-                                <div className="grid grid-cols-2 gap-4">
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                     <CuteSelect label="Category" value={editCategory} onChange={(e: any) => setEditCategory(e.target.value)}>
                                         {categories.map((c) => <option key={c} value={c}>{c}</option>)}
                                     </CuteSelect>
-
-                                    <CuteInput
-                                        label="Date"
-                                        type="date"
-                                        value={editDate}
-                                        onChange={(e: any) => setEditDate(e.target.value)}
-                                    />
+                                    <div className="sm:max-w-[180px]">
+                                        <CuteInput
+                                            label="Date"
+                                            type="date"
+                                            value={editDate}
+                                            onChange={(e: any) => setEditDate(e.target.value)}
+                                        />
+                                    </div>
                                 </div>
 
                                 {/* Conditional Input for 'Others' */}

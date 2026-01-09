@@ -15,6 +15,7 @@ export default function AppShell({
     children: ReactNode
 }) {
     const safeSubtitle = typeof subtitle === 'string' ? subtitle : ''
+    const isMui = safeSubtitle.toLowerCase().includes('mui')
     const [sidebarOpen, setSidebarOpen] = useState(false)
     const [logoutOpen, setLogoutOpen] = useState(false)
 
@@ -78,7 +79,7 @@ export default function AppShell({
                     <div className="w-12 h-12 rounded-full bg-rose-100 border-2 border-white shadow-md overflow-hidden flex items-center justify-center text-xl">
                         <img
                             src={
-                                String(subtitle).toLowerCase().includes('mui')
+                                isMui
                                     ? '/assets/profiles/yier.png'
                                     : '/assets/profiles/bubu.png'
                             }
@@ -120,7 +121,7 @@ export default function AppShell({
                             <SidebarLink href="/" icon="🏠" label="Dashboard" onClick={() => setSidebarOpen(false)} />
                             <SidebarLink href="/memories" icon="💭" label="Memories" onClick={() => setSidebarOpen(false)} />
                             <SidebarLink href="/expenses" icon="🧾" label="Expenses" onClick={() => setSidebarOpen(false)} />
-                            <SidebarLink href="/others" icon="✨" label={`${safeSubtitle.includes('mui') ? "Zai's" : "Mui's"} Expenses`} onClick={() => setSidebarOpen(false)} />
+                            <SidebarLink href="/others" icon="✨" label={`${isMui ? "Zai's" : "Mui's"} Expenses`} onClick={() => setSidebarOpen(false)} />
                             <SidebarLink href="/date" icon="💞" label="Date Expenses" onClick={() => setSidebarOpen(false)} />
                         </div>
 

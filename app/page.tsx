@@ -1,6 +1,6 @@
 'use client'
 
-import { createClient } from '@supabase/supabase-js'
+import { supabaseBrowser } from '@/app/lib/supabase-browser'
 import { useEffect, useMemo, useState } from 'react'
 import AppShell from './components/AppShell'
 
@@ -199,12 +199,7 @@ function CuteSelect({
 
 export default function Dashboard() {
     // --- STATE & SUPABASE LOGIC (Unchanged from original mostly) ---
-    const supabase = useMemo(() => {
-        const url = process.env.NEXT_PUBLIC_SUPABASE_URL
-        const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-        if (!url || !key) throw new Error('Missing Supabase Keys')
-        return createClient(url, key)
-    }, [])
+    const supabase = supabaseBrowser()
 
     const [userName, setUserName] = useState<string>('Bubu') // Default to cute name
     const [total, setTotal] = useState(0)

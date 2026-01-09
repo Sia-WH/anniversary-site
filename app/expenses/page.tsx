@@ -1,6 +1,6 @@
 'use client'
 
-import { createClient } from '@supabase/supabase-js'
+import { supabaseBrowser } from '@/app/lib/supabase-browser'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import AppShell from '../components/AppShell'
 
@@ -117,12 +117,7 @@ export default function ExpensesPage() {
     // 1. YOUR ORIGINAL LOGIC & STATE (UNCHANGED)
     // ==========================================
 
-    const supabase = useMemo(() => {
-        const url = process.env.NEXT_PUBLIC_SUPABASE_URL
-        const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-        if (!url || !key) throw new Error('Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY')
-        return createClient(url, key)
-    }, [])
+    const supabase = supabaseBrowser()
 
     const now = useMemo(() => new Date(), [])
     const [userName, setUserName] = useState('User')
@@ -435,6 +430,13 @@ export default function ExpensesPage() {
     useEffect(() => {
         const load = async () => {
             setErrorMsg(null); setLoading(true)
+
+            if (!supabase) {
+                setLoading(false)
+                setErrorMsg('Missing Supabase env vars.')
+                return
+            }
+
             const { data: sessionRes } = await supabase.auth.getSession()
             const accessToken = sessionRes.session?.access_token
             const { data: userRes } = await supabase.auth.getUser()

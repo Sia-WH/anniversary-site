@@ -2,7 +2,7 @@
 
 'use client'
 
-import { createClient } from '@supabase/supabase-js'
+import { createBrowserClient } from '@supabase/ssr'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import AppShell from '../components/AppShell'
 
@@ -73,8 +73,8 @@ export default function DatePage() {
     const supabase = useMemo(() => {
         const url = process.env.NEXT_PUBLIC_SUPABASE_URL
         const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-        if (!url || !key) throw new Error('Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY')
-        return createClient(url, key)
+        if (!url || !key) return null
+        return createBrowserClient(url, key)
     }, [])
 
     const now = new Date()
@@ -255,6 +255,12 @@ export default function DatePage() {
             try {
                 setLoading(true)
                 setErrorMsg(null)
+
+                if (!supabase) {
+                    setErrorMsg('Missing Supabase env vars.')
+                    setLoading(false)
+                    return
+                }
 
                 const { data: sessionRes } = await supabase.auth.getSession()
                 const token = sessionRes.session?.access_token

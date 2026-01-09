@@ -694,7 +694,7 @@ export default function ExpensesPage() {
 
     return (
         <AppShell title="Expenses" subtitle="">
-            <div className="space-y-6 pb-24 min-h-screen bg-[#FFF9F5] mx-16">
+            <div className="space-y-6 pb-24 min-h-screen bg-[#FFF9F5] mx-6">
 
                 {/* 1. Header & Add Button */}
                 <div className="flex  md:flex-row md:items-center justify-between gap-4">

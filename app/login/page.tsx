@@ -1,6 +1,6 @@
 'use client'
 
-import { createClient } from '@supabase/supabase-js'
+import { createBrowserClient } from '@supabase/ssr'
 import { useRouter } from 'next/navigation'
 import { useMemo, useState } from 'react'
 
@@ -10,12 +10,8 @@ export default function LoginPage() {
     const supabase = useMemo(() => {
         const url = process.env.NEXT_PUBLIC_SUPABASE_URL
         const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-
-        if (!url || !key) {
-            throw new Error('Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY')
-        }
-
-        return createClient(url, key)
+        if (!url || !key) return null
+        return createBrowserClient(url, key)
     }, [])
 
     const [email, setEmail] = useState('')
@@ -25,6 +21,11 @@ export default function LoginPage() {
 
     const handleLogin = async () => {
         setErrorMsg(null)
+
+        if (!supabase) {
+            setErrorMsg('Missing Supabase env vars. Please set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY.')
+            return
+        }
 
         if (!email.trim() || !password) {
             setErrorMsg('Please enter email and password.')
@@ -45,6 +46,9 @@ export default function LoginPage() {
             }
 
             const user = data.session.user
+
+            // Ensure session cookies are present (cookie-based auth for proxy.ts)
+            await supabase.auth.getSession()
 
             // Check if this is first login (profiles row missing or flag still true)
             const { data: profile, error: profileReadErr } = await supabase
@@ -76,14 +80,12 @@ export default function LoginPage() {
                     return
                 }
 
-                document.cookie = 'isLoggedIn=true; Max-Age=604800; path=/; SameSite=Lax'
                 router.push('/memories')
                 router.refresh()
                 return
             }
 
             // Not first login anymore
-            document.cookie = 'isLoggedIn=true; Max-Age=604800; path=/; SameSite=Lax'
 
             if (profile.is_first_login) {
                 router.push('/memories')

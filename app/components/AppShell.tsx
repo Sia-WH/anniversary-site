@@ -1,9 +1,9 @@
 'use client'
 
-import { createClient } from '@supabase/supabase-js'
+import { createBrowserClient } from '@supabase/ssr'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { ReactNode, useState } from 'react'
+import { ReactNode, useMemo, useState } from 'react'
 
 export default function AppShell({
     title = 'Finance App',
@@ -20,15 +20,22 @@ export default function AppShell({
 
     const router = useRouter()
 
-    const supabase = createClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
-        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-    )
+    const supabase = useMemo(() => {
+        const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+        const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+        if (!url || !key) return null
+        return createBrowserClient(url, key)
+    }, [])
 
     const logout = async () => {
+        if (!supabase) {
+            router.replace('/login')
+            router.refresh()
+            return
+        }
+
         await supabase.auth.signOut()
-        document.cookie = 'isLoggedIn=; Max-Age=0; path=/; SameSite=Lax'
-        router.push('/login')
+        router.replace('/login')
         router.refresh()
     }
 

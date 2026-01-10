@@ -40,6 +40,65 @@ const MONTHS = [
     'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
 ]
 
+function toISODate(d: Date) {
+    const yyyy = d.getFullYear()
+    const mm = pad2(d.getMonth() + 1)
+    const dd = pad2(d.getDate())
+    return `${yyyy}-${mm}-${dd}`
+}
+
+function normalizeCategoryName(s: string) {
+    return s.trim().replace(/\s+/g, ' ')
+}
+
+// Reuse ExpensesPage-style input
+function CuteInput({ label, value, onChange, placeholder, type = 'text', inputMode }: any) {
+    return (
+        <div className="space-y-1">
+            {label && (
+                <label className="text-xs font-bold text-stone-400 uppercase tracking-wider ml-1">
+                    {label}
+                </label>
+            )}
+            <input
+                type={type}
+                inputMode={inputMode}
+                value={value}
+                onChange={onChange}
+                placeholder={placeholder}
+                className="w-full min-w-0 bg-white border-2 border-stone-100 rounded-2xl px-4 py-3 font-bold text-stone-700 focus:outline-none focus:border-rose-300 focus:ring-4 focus:ring-rose-100 transition-all placeholder:text-stone-300 shadow-sm text-sm"
+            />
+        </div>
+    )
+}
+
+function CuteToggle({ label, value, onChange, emoji = '💗', hint }: any) {
+    return (
+        <div className="flex items-center justify-between gap-3 bg-white border-2 border-stone-100 rounded-2xl px-4 py-3 shadow-sm">
+            <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                    <span className="text-lg">{emoji}</span>
+                    <span className="font-black text-stone-700">{label}</span>
+                </div>
+                {hint ? <div className="text-xs font-bold text-stone-400 mt-1">{hint}</div> : null}
+            </div>
+
+            <button
+                type="button"
+                onClick={() => onChange(!value)}
+                className={`relative w-14 h-8 rounded-full transition-all border-2 ${value ? 'bg-rose-400 border-rose-300' : 'bg-stone-100 border-stone-200'
+                    }`}
+                aria-pressed={value}
+            >
+                <span
+                    className={`absolute top-1 left-1 w-6 h-6 rounded-full bg-white shadow transition-transform ${value ? 'translate-x-6' : 'translate-x-0'
+                        }`}
+                />
+            </button>
+        </div>
+    )
+}
+
 // --- COMPONENTS ---
 
 type CategoryTotal = {
@@ -201,6 +260,120 @@ export default function Dashboard() {
     // --- STATE & SUPABASE LOGIC (Unchanged from original mostly) ---
     const supabase = supabaseBrowser()
 
+    const [userId, setUserId] = useState<string | null>(null)
+    const [authToken, setAuthToken] = useState<string | null>(null)
+
+    const [addOpen, setAddOpen] = useState(false)
+    const [saving, setSaving] = useState(false)
+    const [errorMsg, setErrorMsg] = useState<string | null>(null)
+
+    const [categoriesList, setCategoriesList] = useState<string[]>(['Others'])
+    const [addAmount, setAddAmount] = useState('')
+    const [addCategory, setAddCategory] = useState('Food')
+    const [addNewCategory, setAddNewCategory] = useState('')
+    const [addDesc, setAddDesc] = useState('')
+    const [addDate, setAddDate] = useState<string>(toISODate(new Date()))
+    const [addIsDating, setAddIsDating] = useState(false)
+    const [addIsForPartner, setAddIsForPartner] = useState(false)
+
+    const openAdd = () => {
+        setAddAmount('')
+        setAddCategory(categoriesList.find((c) => c !== 'Others') ?? 'Others')
+        setAddNewCategory('')
+        setAddDesc('')
+        setAddDate(toISODate(new Date()))
+        setAddIsDating(false)
+        setAddIsForPartner(false)
+        setErrorMsg(null)
+        setAddOpen(true)
+    }
+
+    const fetchCategoriesFromApi = async (token: string) => {
+        const res = await fetch('/api/categories', { headers: { Authorization: `Bearer ${token}` } })
+        if (!res.ok) {
+            setCategoriesList(['Others'])
+            return
+        }
+        const json = await res.json()
+        const apiNames = (json.categories || [])
+            .map((c: any) => normalizeCategoryName(String(c.name)))
+            .filter((s: string) => s.length > 0)
+
+        setCategoriesList(Array.from(new Set([...apiNames, 'Others'])))
+    }
+
+    const addExpense = async () => {
+        if (!userId) {
+            setErrorMsg('Not logged in.')
+            return
+        }
+
+        const amt = Number(addAmount)
+        if (!Number.isFinite(amt) || amt <= 0) {
+            setErrorMsg('Need a valid amount!')
+            return
+        }
+
+        let finalCategory = addCategory.trim()
+        if (finalCategory === 'Others') {
+            const nc = normalizeCategoryName(addNewCategory)
+            if (!nc) {
+                setErrorMsg('Name your new category!')
+                return
+            }
+            finalCategory = nc
+        }
+
+        setSaving(true)
+
+        const { error } = await supabase.from('expenses').insert({
+            user_id: userId,
+            amount: amt,
+            category: finalCategory,
+            description: addDesc.trim() || null,
+            spent_at: addDate,
+            is_dating: addIsDating,
+            is_for_partner: addIsForPartner,
+        })
+
+        if (error) {
+            setErrorMsg(error.message)
+            setSaving(false)
+            return
+        }
+
+        if (addCategory === 'Others') {
+            await supabase.from('expense_categories').insert({ user_id: userId, name: finalCategory })
+            setCategoriesList((prev) => Array.from(new Set([...prev.filter((c) => c !== 'Others'), finalCategory, 'Others'])))
+        }
+
+        setAddOpen(false)
+        setSaving(false)
+
+        // Refresh dashboard totals + pie chart
+        if (authToken) {
+            const res = await fetch(
+                `/api/expenses/summary?year=${selectedYear}&month=${selectedMonth === 'all' ? 'all' : pad2(Number(selectedMonth))}&day=${selectedDay === 'all' ? 'all' : pad2(Number(selectedDay))}&scope=me`,
+                { headers: { Authorization: `Bearer ${authToken}` } }
+            )
+            const json = await res.json()
+            if (res.ok) {
+                setTotal(Number(json.total) || 0)
+                setCategories((json.categories || []).map((c: any) => ({ category: String(c.category), amount: Number(c.amount) || 0 })))
+            }
+        }
+    }
+
+    // lock background scroll while modal open
+    useEffect(() => {
+        if (!addOpen) return
+        const prevOverflow = document.body.style.overflow
+        document.body.style.overflow = 'hidden'
+        return () => {
+            document.body.style.overflow = prevOverflow
+        }
+    }, [addOpen])
+
     const [userName, setUserName] = useState<string>('Bubu') // Default to cute name
     const [total, setTotal] = useState(0)
     const [categories, setCategories] = useState<CategoryTotal[]>([])
@@ -218,11 +391,17 @@ export default function Dashboard() {
         const load = async () => {
             setLoading(true)
             const { data: { user } } = await supabase.auth.getUser()
-            if (user) setUserName(user.user_metadata?.display_name ?? 'User')
+            if (user) {
+                setUserName(user.user_metadata?.display_name ?? 'User')
+                setUserId(user.id)
+            }
 
             const { data: sessionRes } = await supabase.auth.getSession()
             const accessToken = sessionRes.session?.access_token
             if (!accessToken) { setLoading(false); return }
+
+            setAuthToken(accessToken)
+            await fetchCategoriesFromApi(accessToken)
 
             // Fetch Months
             const monthsRes = await fetch('/api/expenses/summary?action=availableMonths&scope=me', { headers: { Authorization: `Bearer ${accessToken}` } })
@@ -308,6 +487,16 @@ export default function Dashboard() {
             `}</style>
 
             <div className="min-h-screen bg-[#FFF9F5] pb-20 w-full">
+
+                {/* Floating Add Button */}
+                <button
+                    type="button"
+                    onClick={openAdd}
+                    className="fixed bottom-6 right-6 z-[60] w-16 h-16 rounded-full bg-rose-500 text-white shadow-[0_12px_30px_rgba(244,63,94,0.35)] flex items-center justify-center text-3xl font-black active:scale-95 hover:bg-rose-600 transition-all"
+                    aria-label="Add expense"
+                >
+                    +
+                </button>
 
                 <div className="max-w-md mx-auto px-4 space-y-6">
 
@@ -430,6 +619,132 @@ export default function Dashboard() {
                     </div>
 
                 </div>
+                {/* ADD MODAL (same as ExpensesPage) */}
+                {addOpen && (
+                    <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+                        <div
+                            className="absolute inset-0 bg-stone-900/30 backdrop-blur-sm transition-opacity"
+                            onClick={() => !saving && setAddOpen(false)}
+                        />
+
+                        <div className="relative w-full max-w-sm sm:max-w-md bg-white rounded-[2.5rem] shadow-2xl p-5 sm:p-6 animate-in zoom-in-95 duration-200 max-h-[85vh] flex flex-col">
+                            <div className="flex justify-between items-center mb-4 pl-1 flex-shrink-0">
+                                <div>
+                                    <h3 className="text-2xl font-black text-stone-700">Add Expense ✨</h3>
+                                    <p className="text-xs font-bold text-stone-400">What did you buy today?</p>
+                                </div>
+                                <button
+                                    onClick={() => !saving && setAddOpen(false)}
+                                    className="w-10 h-10 rounded-full bg-stone-50 text-stone-400 hover:bg-rose-100 hover:text-rose-500 flex items-center justify-center font-bold transition-colors text-lg"
+                                >
+                                    ✕
+                                </button>
+                            </div>
+
+                            <div className="space-y-4 flex-1 overflow-y-auto overscroll-contain pr-1">
+                                <CuteInput
+                                    label="Amount (RM)"
+                                    value={addAmount}
+                                    onChange={(e: any) => setAddAmount(e.target.value)}
+                                    placeholder="0.00"
+                                    inputMode="decimal"
+                                    type="number"
+                                />
+
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 min-w-0">
+                                    <CuteSelect
+                                        label="Category"
+                                        value={addCategory}
+                                        onChange={(val: string) => setAddCategory(val)}
+                                        icon={<span className="text-xs">🏷️</span>}
+                                    >
+                                        {categoriesList.map((c) => (
+                                            <option key={c} value={c}>
+                                                {c}
+                                            </option>
+                                        ))}
+                                    </CuteSelect>
+
+                                    {addCategory === 'Others' && (
+                                        <div className="animate-in slide-in-from-top-2 duration-200">
+                                            <CuteInput
+                                                label="New Category Name"
+                                                value={addNewCategory}
+                                                onChange={(e: any) => setAddNewCategory(e.target.value)}
+                                                placeholder="e.g. Bubble Tea"
+                                            />
+                                        </div>
+                                    )}
+
+                                    <div className="w-full min-w-0 overflow-hidden">
+                                        <CuteInput
+                                            label="Date"
+                                            type="date"
+                                            value={addDate}
+                                            onChange={(e: any) => setAddDate(e.target.value)}
+                                        />
+                                    </div>
+                                </div>
+
+                                <div className="grid grid-cols-1 gap-3">
+                                    <CuteToggle
+                                        label="Dating expense?"
+                                        emoji="💞"
+                                        value={addIsDating}
+                                        onChange={setAddIsDating}
+                                        hint="Turn on if this is a date / couple activity"
+                                    />
+                                    <CuteToggle
+                                        label="For him/her?"
+                                        emoji="🎁"
+                                        value={addIsForPartner}
+                                        onChange={setAddIsForPartner}
+                                        hint="Turn on if this spending is for your partner"
+                                    />
+                                </div>
+
+                                <CuteInput
+                                    label="Description (Optional)"
+                                    value={addDesc}
+                                    onChange={(e: any) => setAddDesc(e.target.value)}
+                                    placeholder="Brief note..."
+                                />
+
+                                {errorMsg && (
+                                    <div className="bg-red-50 border-2 border-red-100 rounded-2xl p-4 flex items-center gap-3 text-red-500">
+                                        <span className="text-2xl">💢</span>
+                                        <span className="font-bold text-sm">{errorMsg}</span>
+                                    </div>
+                                )}
+
+                                <div className="pt-4 flex gap-3">
+                                    <button
+                                        onClick={() => !saving && setAddOpen(false)}
+                                        disabled={saving}
+                                        className="flex-1 py-4 rounded-2xl bg-stone-100 text-stone-500 font-bold hover:bg-stone-200 transition-colors"
+                                    >
+                                        Cancel
+                                    </button>
+                                    <button
+                                        onClick={addExpense}
+                                        disabled={saving}
+                                        className="flex-1 py-4 rounded-2xl bg-rose-400 text-white font-bold hover:bg-rose-500 shadow-lg shadow-rose-200 transition-all active:scale-95 disabled:opacity-50 flex items-center justify-center gap-2"
+                                    >
+                                        {saving ? (
+                                            <>
+                                                <span>⏳</span> Saving...
+                                            </>
+                                        ) : (
+                                            <>
+                                                <span>💖</span> Save It!
+                                            </>
+                                        )}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                )}
             </div>
         </AppShell>
     )

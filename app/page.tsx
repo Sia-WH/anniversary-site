@@ -234,15 +234,12 @@ function CuteSelect({
     icon?: React.ReactNode
 }) {
     return (
-        <div className={`relative flex-1 min-w-[100px] group ${disabled ? 'opacity-50' : ''}`}>
-            <div className="absolute top-2 left-3 z-10 text-rose-400 pointer-events-none">
-                {icon}
-            </div>
+        <div className={`relative flex-1 min-w-25 group ${disabled ? 'opacity-50' : ''}`}>
             <select
                 value={value}
                 onChange={(e) => onChange(e.target.value)}
                 disabled={disabled}
-                className="w-full appearance-none bg-white border-2 border-stone-100 text-stone-600 font-bold rounded-2xl py-3 pl-9 pr-8 text-sm focus:outline-none focus:border-rose-300 focus:ring-4 focus:ring-rose-100 transition-all shadow-sm"
+                className="w-full appearance-none bg-white border-2 border-stone-100 text-stone-600 font-bold rounded-2xl py-3 pl-5 pr-8 text-sm focus:outline-none focus:border-rose-300 focus:ring-4 focus:ring-rose-100 transition-all shadow-sm"
             >
                 {children}
             </select>
@@ -480,12 +477,7 @@ export default function Dashboard() {
 
     return (
         <AppShell title="Finance App" subtitle={`${userName}`}>
-            {/* Inject Nunito Font for Cuteness */}
-            <style jsx global>{`
-                @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap');
-                body { font-family: 'Nunito', sans-serif; }
-            `}</style>
-
+            
             <div className="min-h-screen bg-[#FFF9F5] pb-20 w-full">
 
                 {/* Floating Add Button */}
@@ -507,7 +499,6 @@ export default function Dashboard() {
                                 label="Year"
                                 value={selectedYear}
                                 onChange={v => { setSelectedYear(v); if (v === 'all') { setSelectedMonth('all'); setSelectedDay('all') } }}
-                                icon={<span className="text-xs">📅</span>}
                             >
                                 <option value="all">Years</option>
                                 {Array.from(new Set(availableMonths.map((m) => m.year))).map((y) => <option key={y} value={String(y)}>{y}</option>)}
@@ -518,7 +509,6 @@ export default function Dashboard() {
                                 value={selectedMonth}
                                 onChange={v => { setSelectedMonth(v); if (v === 'all') setSelectedDay('all') }}
                                 disabled={selectedYear === 'all'}
-                                icon={<span className="text-xs">🍂</span>}
                             >
                                 <option value="all">Months</option>
                                 {availableMonths.filter((m) => m.year === Number(selectedYear)).map((m) => <option key={m.month} value={String(m.month)}>{MONTHS[m.month - 1]}</option>)}
@@ -529,7 +519,6 @@ export default function Dashboard() {
                                 value={selectedDay}
                                 onChange={setSelectedDay}
                                 disabled={selectedYear === 'all' || selectedMonth === 'all'}
-                                icon={<span className="text-xs">☀️</span>}
                             >
                                 <option value="all">Days</option>
                                 {availableDays.map((d) => <option key={d} value={String(d)}>{pad2(d)}</option>)}

@@ -42,12 +42,6 @@ export default function AppShell({
 
     return (
         <>
-            {/* Inject Cute Font Globally if not already present */}
-            <style jsx global>{`
-                @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap');
-                body { font-family: 'Nunito', sans-serif; }
-            `}</style>
-
             {/* ================= TOP NAVBAR ================= */}
             <header className="fixed top-0 left-0 right-0 z-40 bg-white/80 backdrop-blur-md border-b-2 border-stone-100">
                 <div className="h-16 px-4 flex items-center justify-between w-full">

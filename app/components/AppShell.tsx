@@ -112,9 +112,9 @@ export default function AppShell({
                     <nav className="flex flex-col h-[calc(100%-6rem)] px-6 pb-6 space-y-3">
                         {/* Menu Items */}
                         <div className="space-y-3 flex-1">
-                            <SidebarLink href="/" icon="🏠" label="Dashboard" onClick={() => setSidebarOpen(false)} />
+                            <SidebarLink href="/" icon="🏠" label="Finance" onClick={() => setSidebarOpen(false)} />
                             <SidebarLink href="/memories" icon="💭" label="Memories" onClick={() => setSidebarOpen(false)} />
-                            <SidebarLink href="/expenses" icon="🧾" label="Expenses" onClick={() => setSidebarOpen(false)} />
+                            <SidebarLink href="/expenses" icon="🧾" label="Finance Tracker" onClick={() => setSidebarOpen(false)} />
                             <SidebarLink href="/others" icon="✨" label={`${isMui ? "Zai's" : "Mui's"} Expenses`} onClick={() => setSidebarOpen(false)} />
                             <SidebarLink href="/date" icon="💞" label="Date Expenses" onClick={() => setSidebarOpen(false)} />
                         </div>

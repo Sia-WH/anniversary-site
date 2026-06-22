@@ -65,6 +65,12 @@ type ExpenseLimitRow = {
     is_active: boolean
 }
 
+type VisibleProfile = {
+    user_id: string
+    display_name: string | null
+    relation: 'me' | 'partner'
+}
+
 type AvailableMonth = {
     year: number
     month: number
@@ -96,6 +102,7 @@ type FormState = {
 
 type FinanceSnapshot = {
     savedAt: number
+    visibleProfiles: VisibleProfile[]
     availableMonths: AvailableMonth[]
     expenseCategories: CategoryRow[]
     incomeCategories: CategoryRow[]
@@ -171,6 +178,12 @@ type SavingsTransactionDbRow = {
     savings_accounts: unknown
 }
 
+type VisibleProfileDbRow = {
+    user_id: unknown
+    display_name: unknown
+    relation: unknown
+}
+
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 const CACHE_TTL_MS = 1000 * 60 * 5
 const MAX_MONTH_SOURCE_ROWS = 750
@@ -240,15 +253,16 @@ function colorForName(name: string) {
     return `hsl(${hue}, 78%, 67%)`
 }
 
-function cacheKey(userId: string, year: string, month: string) {
-    return `finance:v2:${userId}:${year}-${pad2(Number(month))}`
+function cacheKey(userId: string, visibleUserIds: string[], year: string, month: string) {
+    const scope = Array.from(new Set([userId, ...visibleUserIds])).sort().join(',')
+    return `finance:v3:couple:${userId}:${scope}:${year}-${pad2(Number(month))}`
 }
 
-function readSnapshot(userId: string, year: string, month: string) {
+function readSnapshot(userId: string, visibleUserIds: string[], year: string, month: string) {
     if (typeof window === 'undefined') return null
 
     try {
-        const raw = window.localStorage.getItem(cacheKey(userId, year, month))
+        const raw = window.localStorage.getItem(cacheKey(userId, visibleUserIds, year, month))
         if (!raw) return null
 
         const parsed = JSON.parse(raw) as FinanceSnapshot
@@ -259,12 +273,18 @@ function readSnapshot(userId: string, year: string, month: string) {
     }
 }
 
-function writeSnapshot(userId: string, year: string, month: string, snapshot: Omit<FinanceSnapshot, 'savedAt'>) {
+function writeSnapshot(
+    userId: string,
+    visibleUserIds: string[],
+    year: string,
+    month: string,
+    snapshot: Omit<FinanceSnapshot, 'savedAt'>
+) {
     if (typeof window === 'undefined') return
 
     try {
         window.localStorage.setItem(
-            cacheKey(userId, year, month),
+            cacheKey(userId, visibleUserIds, year, month),
             JSON.stringify({
                 ...snapshot,
                 savedAt: Date.now(),
@@ -448,6 +468,7 @@ export default function FinanceTracker() {
     const [availableMonths, setAvailableMonths] = useState<AvailableMonth[]>([
         { year: now.getFullYear(), month: now.getMonth() + 1 },
     ])
+    const [visibleProfiles, setVisibleProfiles] = useState<VisibleProfile[]>([])
     const [expenseCategories, setExpenseCategories] = useState<CategoryRow[]>([])
     const [incomeCategories, setIncomeCategories] = useState<CategoryRow[]>([])
     const [savingsAccounts, setSavingsAccounts] = useState<SavingsAccountRow[]>([])
@@ -487,6 +508,7 @@ export default function FinanceTracker() {
     }, [savingsAccounts])
 
     const applySnapshot = useCallback((snapshot: Omit<FinanceSnapshot, 'savedAt'>) => {
+        setVisibleProfiles(snapshot.visibleProfiles)
         setAvailableMonths(snapshot.availableMonths)
         setExpenseCategories(snapshot.expenseCategories)
         setIncomeCategories(snapshot.incomeCategories)
@@ -498,13 +520,47 @@ export default function FinanceTracker() {
         setTotalSavingsBalance(snapshot.totalSavingsBalance)
     }, [])
 
+    const getExpenseOwner = useCallback(
+        (ownerUserId: string) => {
+            const owner = visibleProfiles.find((profile) => profile.user_id === ownerUserId)
+            if (!owner) return { name: 'Partner', relation: 'partner' as const }
+            if (owner.relation === 'me') return { name: owner.display_name || 'Me', relation: 'me' as const }
+            return { name: owner.display_name || 'Partner', relation: 'partner' as const }
+        },
+        [visibleProfiles]
+    )
+
+    const loadVisibleProfiles = useCallback(async () => {
+        const { data, error } = await supabase.rpc('finance_visible_profiles')
+        if (error) {
+            return [{ user_id: userId ?? '', display_name: userName, relation: 'me' as const }].filter(
+                (profile) => profile.user_id
+            )
+        }
+
+        const profiles = ((data ?? []) as VisibleProfileDbRow[])
+            .map((row) => ({
+                user_id: String(row.user_id),
+                display_name: row.display_name ? String(row.display_name) : null,
+                relation: row.relation === 'me' ? ('me' as const) : ('partner' as const),
+            }))
+            .filter((profile) => profile.user_id)
+
+        if (profiles.length > 0) return profiles
+        return [{ user_id: userId ?? '', display_name: userName, relation: 'me' as const }].filter(
+            (profile) => profile.user_id
+        )
+    }, [supabase, userId, userName])
+
     const loadFinanceData = useCallback(
         async (options?: { force?: boolean }) => {
             if (!userId) return
 
             const seq = ++loadSeqRef.current
+            const loadedProfiles = await loadVisibleProfiles()
+            const visibleUserIds = Array.from(new Set([userId, ...loadedProfiles.map((profile) => profile.user_id)])).filter(Boolean)
             const shouldUseCache = !options?.force
-            const cached = shouldUseCache ? readSnapshot(userId, selectedYear, selectedMonth) : null
+            const cached = shouldUseCache ? readSnapshot(userId, visibleUserIds, selectedYear, selectedMonth) : null
 
             if (cached) {
                 applySnapshot(cached)
@@ -535,7 +591,7 @@ export default function FinanceTracker() {
                     supabase
                         .from('expenses')
                         .select('spent_at')
-                        .eq('user_id', userId)
+                        .in('user_id', visibleUserIds)
                         .order('spent_at', { ascending: false })
                         .limit(MAX_MONTH_SOURCE_ROWS),
                     supabase
@@ -573,7 +629,7 @@ export default function FinanceTracker() {
                     supabase
                         .from('expenses')
                         .select('id, user_id, amount, category, category_id, description, spent_at, created_at, is_dating, is_for_partner')
-                        .eq('user_id', userId)
+                        .in('user_id', visibleUserIds)
                         .gte('spent_at', startISO)
                         .lt('spent_at', endISO)
                         .order('spent_at', { ascending: false })
@@ -661,6 +717,7 @@ export default function FinanceTracker() {
                 savingsMonthRows.forEach((row) => addMonth(row.saved_at))
 
                 const nextSnapshot: Omit<FinanceSnapshot, 'savedAt'> = {
+                    visibleProfiles: loadedProfiles,
                     availableMonths: Array.from(monthMap.values()).sort((a, b) =>
                         a.year === b.year ? b.month - a.month : b.year - a.year
                     ),
@@ -726,7 +783,7 @@ export default function FinanceTracker() {
                 if (seq !== loadSeqRef.current) return
 
                 applySnapshot(nextSnapshot)
-                writeSnapshot(userId, selectedYear, selectedMonth, nextSnapshot)
+                writeSnapshot(userId, visibleUserIds, selectedYear, selectedMonth, nextSnapshot)
                 setUsedCache(false)
                 setErrorMsg(null)
             } catch (error) {
@@ -739,7 +796,7 @@ export default function FinanceTracker() {
                 }
             }
         },
-        [applySnapshot, loading, now, selectedMonth, selectedYear, supabase, userId]
+        [applySnapshot, loadVisibleProfiles, loading, now, selectedMonth, selectedYear, supabase, userId]
     )
 
     useEffect(() => {
@@ -1470,6 +1527,9 @@ export default function FinanceTracker() {
                             <div className="space-y-3">
                                 {visibleTransactions.map((transaction) => {
                                     const isPositive = transaction.amount >= 0
+                                    const isOwnRecord = transaction.source.user_id === userId
+                                    const expenseOwner =
+                                        transaction.kind === 'expense' ? getExpenseOwner(transaction.source.user_id) : null
                                     const badge =
                                         transaction.kind === 'expense'
                                             ? 'Expense'
@@ -1511,21 +1571,38 @@ export default function FinanceTracker() {
                                                             {transaction.description}
                                                         </p>
                                                     ) : null}
-                                                    <div className="mt-3 flex justify-end gap-2">
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => openEdit(transaction)}
-                                                            className="rounded-2xl bg-amber-50 px-4 py-2 text-xs font-black text-amber-700"
-                                                        >
-                                                            Edit
-                                                        </button>
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => setDeleteTarget(transaction)}
-                                                            className="rounded-2xl bg-rose-50 px-4 py-2 text-xs font-black text-rose-600"
-                                                        >
-                                                            Delete
-                                                        </button>
+                                                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                                                        {expenseOwner ? (
+                                                            <span
+                                                                className={`rounded-2xl px-3 py-1 text-[11px] font-black ${expenseOwner.relation === 'me'
+                                                                    ? 'bg-stone-50 text-stone-500'
+                                                                    : 'bg-sky-50 text-sky-700'
+                                                                    }`}
+                                                            >
+                                                                {expenseOwner.relation === 'me' ? 'Me' : 'Partner'} · {expenseOwner.name}
+                                                            </span>
+                                                        ) : (
+                                                            <span />
+                                                        )}
+
+                                                        {isOwnRecord ? (
+                                                            <div className="flex gap-2">
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => openEdit(transaction)}
+                                                                    className="rounded-2xl bg-amber-50 px-4 py-2 text-xs font-black text-amber-700"
+                                                                >
+                                                                    Edit
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => setDeleteTarget(transaction)}
+                                                                    className="rounded-2xl bg-rose-50 px-4 py-2 text-xs font-black text-rose-600"
+                                                                >
+                                                                    Delete
+                                                                </button>
+                                                            </div>
+                                                        ) : null}
                                                     </div>
                                                 </div>
                                             </div>

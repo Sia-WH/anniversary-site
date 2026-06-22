@@ -1,4 +1,4 @@
-import { createClient } from '@supabase/supabase-js'
+import { SupabaseClient, createClient } from '@supabase/supabase-js'
 import { NextResponse } from 'next/server'
 
 type ExpenseDateRow = {
@@ -21,6 +21,12 @@ type ExpenseTransactionRow = {
     created_at: string | null
     is_dating: boolean | null
     is_for_partner: boolean | null
+}
+
+type VisibleProfileRow = {
+    user_id: string
+    display_name: string | null
+    relation: 'me' | 'partner'
 }
 
 function parseDateRange(url: URL) {
@@ -66,6 +72,37 @@ function toAmount(value: number | string | null) {
     return Number.isFinite(amount) ? amount : 0
 }
 
+async function loadVisibleProfiles(
+    supabase: SupabaseClient,
+    currentUserId: string,
+    scope: string
+) {
+    const { data, error } = await supabase.rpc('finance_visible_profiles')
+    const fallback = [{ user_id: currentUserId, display_name: null, relation: 'me' as const }]
+
+    const allProfiles: VisibleProfileRow[] = error
+        ? fallback
+        : ((data ?? []) as Array<{ user_id: unknown; display_name: unknown; relation: unknown }>)
+            .map((row) => ({
+                user_id: String(row.user_id),
+                display_name: row.display_name ? String(row.display_name) : null,
+                relation: row.relation === 'partner' ? ('partner' as const) : ('me' as const),
+            }))
+            .filter((row) => row.user_id)
+
+    const profiles = allProfiles.length > 0 ? allProfiles : fallback
+
+    if (scope === 'me' || scope === 'self') {
+        return profiles.filter((profile) => profile.user_id === currentUserId)
+    }
+
+    if (scope === 'other') {
+        return profiles.filter((profile) => profile.user_id !== currentUserId)
+    }
+
+    return profiles
+}
+
 export async function GET(req: Request) {
     const auth = req.headers.get('authorization')
     const token = auth?.startsWith('Bearer ') ? auth.slice(7) : null
@@ -93,13 +130,24 @@ export async function GET(req: Request) {
 
     const url = new URL(req.url)
     const action = url.searchParams.get('action')
-    const scope = url.searchParams.get('scope') ?? 'me'
+    const scope = url.searchParams.get('scope') ?? 'couple'
     const onlyDating =
         url.searchParams.get('onlyDating') === '1' || url.searchParams.get('onlyDating') === 'true'
     const userId = userRes.user.id
+    const visibleProfiles = await loadVisibleProfiles(supabase, userId, scope)
+    const visibleUserIds = visibleProfiles.map((profile) => profile.user_id)
+    const profileById = new Map(visibleProfiles.map((profile) => [profile.user_id, profile]))
+
+    if (visibleUserIds.length === 0) {
+        if (action === 'availableMonths') return NextResponse.json({ months: [] })
+        if (action === 'availableDays') return NextResponse.json({ days: [] })
+        if (action === 'transactions') return NextResponse.json({ rows: [], hasMore: false })
+        if (action === 'count') return NextResponse.json({ count: 0 })
+        return NextResponse.json({ total: 0, categories: [], totalsByUser: [] })
+    }
 
     if (action === 'availableMonths') {
-        let query = supabase.from('expenses').select('spent_at').eq('user_id', userId)
+        let query = supabase.from('expenses').select('spent_at').in('user_id', visibleUserIds)
         if (onlyDating) query = query.eq('is_dating', true)
 
         const { data, error } = await query
@@ -138,7 +186,7 @@ export async function GET(req: Request) {
         let query = supabase
             .from('expenses')
             .select('spent_at')
-            .eq('user_id', userId)
+            .in('user_id', visibleUserIds)
             .gte('spent_at', startISO)
             .lt('spent_at', endISO)
         if (onlyDating) query = query.eq('is_dating', true)
@@ -170,7 +218,7 @@ export async function GET(req: Request) {
         let query = supabase
             .from('expenses')
             .select('id, user_id, amount, category, description, spent_at, created_at, is_dating, is_for_partner')
-            .eq('user_id', userId)
+            .in('user_id', visibleUserIds)
             .order('spent_at', { ascending: false })
             .order('id', { ascending: false })
             .range(from, to)
@@ -186,6 +234,8 @@ export async function GET(req: Request) {
         const rows = ((data ?? []) as ExpenseTransactionRow[]).map((row) => ({
             ...row,
             amount: toAmount(row.amount),
+            owner_name: profileById.get(row.user_id)?.display_name ?? null,
+            owner_relation: profileById.get(row.user_id)?.relation ?? 'partner',
         }))
 
         return NextResponse.json({ rows, hasMore: rows.length === limit })
@@ -195,7 +245,7 @@ export async function GET(req: Request) {
         let query = supabase
             .from('expenses')
             .select('id', { count: 'exact', head: true })
-            .eq('user_id', userId)
+            .in('user_id', visibleUserIds)
 
         if (onlyDating) query = query.eq('is_dating', true)
         if (range.startISO && range.endISO) {
@@ -211,7 +261,7 @@ export async function GET(req: Request) {
     let query = supabase
         .from('expenses')
         .select('amount, category, user_id')
-        .eq('user_id', userId)
+        .in('user_id', visibleUserIds)
 
     if (onlyDating) query = query.eq('is_dating', true)
     if (range.startISO && range.endISO) {
@@ -223,19 +273,24 @@ export async function GET(req: Request) {
 
     let total = 0
     const categoryTotals = new Map<string, number>()
+    const userTotals = new Map<string, number>()
 
     ;((data ?? []) as ExpenseSummaryRow[]).forEach((row) => {
         const amount = toAmount(row.amount)
         const category = row.category || 'Uncategorized'
+        const ownerUserId = row.user_id || userId
         total += amount
         categoryTotals.set(category, (categoryTotals.get(category) ?? 0) + amount)
+        userTotals.set(ownerUserId, (userTotals.get(ownerUserId) ?? 0) + amount)
     })
 
     const categories = Array.from(categoryTotals.entries()).map(([category, amount]) => ({ category, amount }))
+    const totalsByUser = visibleProfiles.map((profile) => ({
+        user_id: profile.user_id,
+        total: userTotals.get(profile.user_id) ?? 0,
+        owner_name: profile.display_name,
+        owner_relation: profile.relation,
+    }))
 
-    if (scope === 'all') {
-        return NextResponse.json({ total, categories, totalsByUser: [{ user_id: userId, total }] })
-    }
-
-    return NextResponse.json({ total, categories })
+    return NextResponse.json({ total, categories, totalsByUser })
 }

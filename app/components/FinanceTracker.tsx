@@ -1,11 +1,18 @@
 'use client'
 
+import {
+    calculateFinanceTotals,
+    calculateSavingsAccountBalances,
+    calculateSavingsBalance,
+    getAvailableBalanceForWithdrawal,
+    type SavingsAction,
+    type SavingsSource,
+} from '@/app/lib/finance-calculations'
 import { supabaseBrowser } from '@/app/lib/supabase-browser'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import AppShell from './AppShell'
 
 type TransactionKind = 'expense' | 'income' | 'savings'
-type SavingsAction = 'deposit' | 'withdrawal'
 
 type CategoryRow = {
     id: string
@@ -51,6 +58,7 @@ type SavingsTransactionRow = {
     account_name: string
     amount: number
     type: SavingsAction
+    source: SavingsSource
     description: string | null
     saved_at: string
     created_at: string | null
@@ -96,6 +104,7 @@ type FormState = {
     isDating: boolean
     isForPartner: boolean
     savingsType: SavingsAction
+    savingsSource: SavingsSource
     accountId: string
     newAccount: string
 }
@@ -111,6 +120,8 @@ type FinanceSnapshot = {
     expenseRows: ExpenseRow[]
     incomeRows: IncomeRow[]
     savingsRows: SavingsTransactionRow[]
+    allSavingsRows: SavingsTransactionRow[]
+    savingsAccountBalances: Record<string, number>
     totalSavingsBalance: number
 }
 
@@ -172,10 +183,11 @@ type SavingsTransactionDbRow = {
     account_id: unknown
     amount: unknown
     type: unknown
+    source: unknown
     description: unknown
     saved_at: unknown
     created_at: unknown
-    savings_accounts: unknown
+    savings_accounts?: unknown
 }
 
 type VisibleProfileDbRow = {
@@ -191,6 +203,11 @@ const MAX_MONTH_SOURCE_ROWS = 750
 const DEFAULT_EXPENSE_CATEGORIES = ['Food', 'Transport', 'Entertainment', 'Shopping', 'Bills', 'Dating', 'Others']
 const DEFAULT_INCOME_CATEGORIES = ['Salary', 'Freelance', 'Business', 'Bonus', 'Other']
 const DEFAULT_SAVINGS_ACCOUNTS = ['Emergency Fund', 'House Fund', 'Car Fund', 'Investment Fund', 'General Savings']
+const SAVINGS_SOURCE_OPTIONS: Array<{ value: SavingsSource; label: string }> = [
+    { value: 'monthly_income', label: 'Monthly Income' },
+    { value: 'existing_money', label: 'Existing Money' },
+    { value: 'other', label: 'Other' },
+]
 
 function pad2(n: number) {
     return String(n).padStart(2, '0')
@@ -242,6 +259,14 @@ function mergeNames(base: string[], rows: CategoryRow[]) {
     return Array.from(new Set([...names, ...base]))
 }
 
+function normalizeSavingsSource(value: unknown): SavingsSource {
+    return value === 'existing_money' || value === 'other' ? value : 'monthly_income'
+}
+
+function savingsSourceLabel(source: SavingsSource) {
+    return SAVINGS_SOURCE_OPTIONS.find((option) => option.value === source)?.label ?? 'Monthly Income'
+}
+
 function colorForName(name: string) {
     let hash = 0
     for (let index = 0; index < name.length; index += 1) {
@@ -255,7 +280,7 @@ function colorForName(name: string) {
 
 function cacheKey(userId: string, visibleUserIds: string[], year: string, month: string) {
     const scope = Array.from(new Set([userId, ...visibleUserIds])).sort().join(',')
-    return `finance:v3:couple:${userId}:${scope}:${year}-${pad2(Number(month))}`
+    return `finance:v4:personal-dashboard+shared-expenses:${userId}:${scope}:${year}-${pad2(Number(month))}`
 }
 
 function readSnapshot(userId: string, visibleUserIds: string[], year: string, month: string) {
@@ -315,6 +340,7 @@ function initialFormState(date: string): FormState {
         isDating: false,
         isForPartner: false,
         savingsType: 'deposit',
+        savingsSource: 'monthly_income',
         accountId: '',
         newAccount: '',
     }
@@ -476,6 +502,8 @@ export default function FinanceTracker() {
     const [expenseRows, setExpenseRows] = useState<ExpenseRow[]>([])
     const [incomeRows, setIncomeRows] = useState<IncomeRow[]>([])
     const [savingsRows, setSavingsRows] = useState<SavingsTransactionRow[]>([])
+    const [allSavingsRows, setAllSavingsRows] = useState<SavingsTransactionRow[]>([])
+    const [savingsAccountBalances, setSavingsAccountBalances] = useState<Record<string, number>>({})
     const [totalSavingsBalance, setTotalSavingsBalance] = useState(0)
 
     const [formOpen, setFormOpen] = useState(false)
@@ -517,6 +545,8 @@ export default function FinanceTracker() {
         setExpenseRows(snapshot.expenseRows)
         setIncomeRows(snapshot.incomeRows)
         setSavingsRows(snapshot.savingsRows)
+        setAllSavingsRows(snapshot.allSavingsRows)
+        setSavingsAccountBalances(snapshot.savingsAccountBalances)
         setTotalSavingsBalance(snapshot.totalSavingsBalance)
     }, [])
 
@@ -586,7 +616,7 @@ export default function FinanceTracker() {
                     expenseRowsRes,
                     incomeRowsRes,
                     savingsRowsRes,
-                    savingsBalanceRpcRes,
+                    savingsAllRowsRes,
                 ] = await Promise.all([
                     supabase
                         .from('expenses')
@@ -644,13 +674,16 @@ export default function FinanceTracker() {
                         .order('created_at', { ascending: false }),
                     supabase
                         .from('savings_transactions')
-                        .select('id, user_id, account_id, amount, type, description, saved_at, created_at, savings_accounts(name)')
+                        .select('id, user_id, account_id, amount, type, source, description, saved_at, created_at, savings_accounts(name)')
                         .eq('user_id', userId)
                         .gte('saved_at', startISO)
                         .lt('saved_at', endISO)
                         .order('saved_at', { ascending: false })
                         .order('created_at', { ascending: false }),
-                    supabase.rpc('finance_savings_balance'),
+                    supabase
+                        .from('savings_transactions')
+                        .select('id, user_id, account_id, amount, type, source, description, saved_at, created_at, savings_accounts(name)')
+                        .eq('user_id', userId),
                 ])
 
                 const firstError = [
@@ -664,27 +697,10 @@ export default function FinanceTracker() {
                     expenseRowsRes.error,
                     incomeRowsRes.error,
                     savingsRowsRes.error,
+                    savingsAllRowsRes.error,
                 ].find(Boolean)
 
                 if (firstError) throw firstError
-
-                let savingsBalance = toNumber(savingsBalanceRpcRes.data)
-                if (savingsBalanceRpcRes.error) {
-                    const fallbackBalanceRes = await supabase
-                        .from('savings_transactions')
-                        .select('amount, type')
-                        .eq('user_id', userId)
-
-                    if (fallbackBalanceRes.error) throw fallbackBalanceRes.error
-
-                    savingsBalance = (fallbackBalanceRes.data ?? []).reduce(
-                        (sum: number, row: { amount: unknown; type: unknown }) => {
-                        const amount = toNumber(row.amount)
-                        return row.type === 'withdrawal' ? sum - amount : sum + amount
-                        },
-                        0
-                    )
-                }
 
                 const monthMap = new Map<string, AvailableMonth>()
                 const addMonth = (date: unknown) => {
@@ -711,10 +727,26 @@ export default function FinanceTracker() {
                 const monthlyExpenseRows = (expenseRowsRes.data ?? []) as ExpenseDbRow[]
                 const monthlyIncomeRows = (incomeRowsRes.data ?? []) as IncomeDbRow[]
                 const monthlySavingsRows = (savingsRowsRes.data ?? []) as SavingsTransactionDbRow[]
+                const allSavingsTransactionRows = (savingsAllRowsRes.data ?? []) as SavingsTransactionDbRow[]
 
                 expenseMonthRows.forEach((row) => addMonth(row.spent_at))
                 incomeMonthRows.forEach((row) => addMonth(row.received_at))
                 savingsMonthRows.forEach((row) => addMonth(row.saved_at))
+
+                const mappedAllSavingsRows = allSavingsTransactionRows.map((row) => ({
+                    id: String(row.id),
+                    user_id: String(row.user_id),
+                    account_id: row.account_id ? String(row.account_id) : null,
+                    account_name: getRelatedAccountName(row.savings_accounts) || 'General Savings',
+                    amount: toNumber(row.amount),
+                    type: row.type === 'withdrawal' ? ('withdrawal' as const) : ('deposit' as const),
+                    source: normalizeSavingsSource(row.source),
+                    description: row.description ? String(row.description) : null,
+                    saved_at: String(row.saved_at),
+                    created_at: row.created_at ? String(row.created_at) : null,
+                }))
+                const savingsBalance = calculateSavingsBalance(mappedAllSavingsRows, { userId })
+                const accountBalances = calculateSavingsAccountBalances(mappedAllSavingsRows, userId)
 
                 const nextSnapshot: Omit<FinanceSnapshot, 'savedAt'> = {
                     visibleProfiles: loadedProfiles,
@@ -773,10 +805,13 @@ export default function FinanceTracker() {
                         account_name: getRelatedAccountName(row.savings_accounts) || 'General Savings',
                         amount: toNumber(row.amount),
                         type: row.type === 'withdrawal' ? 'withdrawal' : 'deposit',
+                        source: normalizeSavingsSource(row.source),
                         description: row.description ? String(row.description) : null,
                         saved_at: String(row.saved_at),
                         created_at: row.created_at ? String(row.created_at) : null,
                     })),
+                    allSavingsRows: mappedAllSavingsRows,
+                    savingsAccountBalances: accountBalances,
                     totalSavingsBalance: savingsBalance,
                 }
 
@@ -837,25 +872,54 @@ export default function FinanceTracker() {
         }
     }, [budgetOpen, deleteTarget, formOpen])
 
-    const totals = useMemo(() => {
-        const expenses = expenseRows.reduce((sum, row) => sum + row.amount, 0)
-        const income = incomeRows.reduce((sum, row) => sum + row.amount, 0)
-        const savingsDeposits = savingsRows
-            .filter((row) => row.type === 'deposit')
-            .reduce((sum, row) => sum + row.amount, 0)
-        const savingsWithdrawals = savingsRows
-            .filter((row) => row.type === 'withdrawal')
-            .reduce((sum, row) => sum + row.amount, 0)
+    const ownExpenseRows = useMemo(
+        () => (userId ? expenseRows.filter((row) => row.user_id === userId) : []),
+        [expenseRows, userId]
+    )
 
+    const partnerExpenseRows = useMemo(
+        () => (userId ? expenseRows.filter((row) => row.user_id !== userId) : []),
+        [expenseRows, userId]
+    )
+
+    const expenseScopeTotals = useMemo(() => {
+        const myExpenses = ownExpenseRows.reduce((sum, row) => sum + row.amount, 0)
+        const partnerExpenses = partnerExpenseRows.reduce((sum, row) => sum + row.amount, 0)
         return {
-            expenses,
-            income,
-            net: income - expenses,
-            monthlySavings: savingsDeposits - savingsWithdrawals,
-            savingsDeposits,
-            savingsWithdrawals,
+            myExpenses,
+            partnerExpenses,
+            combinedExpenses: myExpenses + partnerExpenses,
         }
-    }, [expenseRows, incomeRows, savingsRows])
+    }, [ownExpenseRows, partnerExpenseRows])
+
+    const partnerLabel = useMemo(() => {
+        const partner = visibleProfiles.find((profile) => profile.relation === 'partner')
+        return partner?.display_name || 'Partner'
+    }, [visibleProfiles])
+
+    const hasPartnerVisibility = visibleProfiles.some((profile) => profile.relation === 'partner')
+
+    const totals = useMemo(() => {
+        if (!userId) {
+            return {
+                expenses: 0,
+                income: 0,
+                netBeforeSavings: 0,
+                savedFromIncome: 0,
+                cashFlow: 0,
+                monthlySavings: 0,
+                savingsDeposits: 0,
+                savingsWithdrawals: 0,
+            }
+        }
+
+        return calculateFinanceTotals({
+            userId,
+            expenses: expenseRows,
+            incomes: incomeRows,
+            savings: savingsRows,
+        })
+    }, [expenseRows, incomeRows, savingsRows, userId])
 
     const unifiedTransactions = useMemo<UnifiedTransaction[]>(() => {
         const expenses = expenseRows.map((row) => ({
@@ -906,7 +970,7 @@ export default function FinanceTracker() {
         const spentByCategory = new Map<string, number>()
         const spentByName = new Map<string, number>()
 
-        expenseRows.forEach((row) => {
+        ownExpenseRows.forEach((row) => {
             if (row.category_id) {
                 spentByCategory.set(row.category_id, (spentByCategory.get(row.category_id) ?? 0) + row.amount)
             }
@@ -930,7 +994,7 @@ export default function FinanceTracker() {
                 progress: Math.min(100, Math.round((spent / Math.max(limit.monthly_limit, 1)) * 100)),
             }
         })
-    }, [expenseLimits, expenseRows])
+    }, [expenseLimits, ownExpenseRows])
 
     async function ensureExpenseCategory(name: string) {
         const normalized = normalizeName(name)
@@ -1041,6 +1105,7 @@ export default function FinanceTracker() {
             accountId: type === 'savings' ? savingsAccounts[0]?.id ?? '' : '',
             newAccount: type === 'savings' && savingsAccounts.length === 0 ? 'General Savings' : '',
             savingsType: type === 'savings' ? current.savingsType : 'deposit',
+            savingsSource: type === 'savings' ? current.savingsSource : 'monthly_income',
             isDating: false,
             isForPartner: false,
         }))
@@ -1101,6 +1166,7 @@ export default function FinanceTracker() {
                 accountId: row.account_id ?? '',
                 newAccount: row.account_id ? '' : row.account_name,
                 savingsType: row.type,
+                savingsSource: row.source,
                 description: row.description ?? '',
             })
         }
@@ -1183,12 +1249,34 @@ export default function FinanceTracker() {
                 const accountName = selectedAccount?.name ?? normalizeName(form.newAccount || 'General Savings')
                 if (!accountName) throw new Error('Please choose a savings account.')
 
+                if (form.savingsType === 'withdrawal' && !selectedAccount) {
+                    throw new Error('Please choose an existing savings account before withdrawing.')
+                }
+
                 const account = selectedAccount ?? (await ensureSavingsAccount(accountName))
+                const source = form.savingsType === 'deposit' ? form.savingsSource : 'other'
+
+                if (form.savingsType === 'withdrawal') {
+                    const availableBalance = getAvailableBalanceForWithdrawal(allSavingsRows, {
+                        userId,
+                        accountId: account.id,
+                        editingTransactionId:
+                            formMode === 'edit' && editingTarget?.kind === 'savings' ? editingTarget.id : null,
+                    })
+
+                    if (amount > availableBalance) {
+                        throw new Error(
+                            `Withdrawal exceeds ${account.name} balance. Available: RM ${money(availableBalance)}.`
+                        )
+                    }
+                }
+
                 const payload = {
                     user_id: userId,
                     account_id: account.id,
                     amount,
                     type: form.savingsType,
+                    source,
                     description: form.description.trim() || null,
                     saved_at: form.date,
                 }
@@ -1394,38 +1482,75 @@ export default function FinanceTracker() {
 
                     <section className="grid grid-cols-2 gap-3">
                         <SummaryCard
-                            label="Income"
+                            label="My Income"
                             value={`RM ${money(totals.income)}`}
-                            hint="This month"
+                            hint="Personal this month"
                             tone="emerald"
                         />
                         <SummaryCard
-                            label="Expenses"
+                            label="My Expenses"
                             value={`RM ${money(totals.expenses)}`}
-                            hint="This month"
+                            hint="Personal this month"
                             tone="rose"
                         />
                         <SummaryCard
-                            label="Cash Flow"
-                            value={signedMoney(totals.net)}
-                            hint="Income minus expenses"
-                            tone={totals.net >= 0 ? 'amber' : 'rose'}
-                        />
-                        <SummaryCard
-                            label="Savings"
-                            value={signedMoney(totals.monthlySavings)}
-                            hint="Deposits minus withdrawals"
+                            label="Saved from Income"
+                            value={`RM ${money(totals.savedFromIncome)}`}
+                            hint="Reduces cash flow"
                             tone="sky"
                         />
-                        <div className="col-span-2">
-                            <SummaryCard
-                                label="Total Savings Balance"
-                                value={`RM ${money(totalSavingsBalance)}`}
-                                hint={`${money(totals.savingsDeposits)} deposited, ${money(totals.savingsWithdrawals)} withdrawn this month`}
-                                tone="stone"
-                            />
-                        </div>
+                        <SummaryCard
+                            label="Cash Flow"
+                            value={signedMoney(totals.cashFlow)}
+                            hint="Income - expenses - saved income"
+                            tone={totals.cashFlow >= 0 ? 'amber' : 'rose'}
+                        />
+                        <SummaryCard
+                            label="Net Savings"
+                            value={signedMoney(totals.monthlySavings)}
+                            hint="All sources, deposits - withdrawals"
+                            tone="sky"
+                        />
+                        <SummaryCard
+                            label="Total Savings"
+                            value={`RM ${money(totalSavingsBalance)}`}
+                            hint={`${money(totals.savingsDeposits)} deposited, ${money(totals.savingsWithdrawals)} withdrawn`}
+                            tone="stone"
+                        />
                     </section>
+
+                    {hasPartnerVisibility ? (
+                        <section className="space-y-3 rounded-[2rem] bg-white p-4 shadow-sm">
+                            <div>
+                                <h2 className="text-lg font-black text-stone-800">Shared Expense View</h2>
+                                <p className="text-xs font-bold text-stone-400">
+                                    Visible partner expenses are separate from your personal cash flow.
+                                </p>
+                            </div>
+                            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                                <div className="rounded-3xl bg-stone-50 p-3">
+                                    <p className="text-[10px] font-black uppercase tracking-widest text-stone-400">Me</p>
+                                    <p className="mt-1 text-sm font-black text-stone-800">
+                                        RM {money(expenseScopeTotals.myExpenses)}
+                                    </p>
+                                </div>
+                                <div className="rounded-3xl bg-sky-50 p-3">
+                                    <p className="truncate text-[10px] font-black uppercase tracking-widest text-sky-500">
+                                        {partnerLabel}
+                                    </p>
+                                    <p className="mt-1 text-sm font-black text-sky-800">
+                                        RM {money(expenseScopeTotals.partnerExpenses)}
+                                    </p>
+                                </div>
+                                <div className="rounded-3xl bg-rose-50 p-3">
+                                    <p className="text-[10px] font-black uppercase tracking-widest text-rose-500">Combined</p>
+                                    <p className="mt-1 text-sm font-black text-rose-800">
+                                        RM {money(expenseScopeTotals.combinedExpenses)}
+                                    </p>
+                                </div>
+                            </div>
+                        </section>
+                    ) : null}
 
                     <section className="grid grid-cols-3 gap-2">
                         <TypeButton active label="Expense" tone="rose" onClick={() => openCreate('expense')} />
@@ -1496,7 +1621,10 @@ export default function FinanceTracker() {
 
                     <section className="space-y-3">
                         <div className="flex items-center justify-between gap-3 px-1">
-                            <h2 className="text-lg font-black text-stone-800">Monthly History</h2>
+                            <div>
+                                <h2 className="text-lg font-black text-stone-800">Shared Monthly History</h2>
+                                <p className="text-xs font-bold text-stone-400">Income and savings are yours; expenses can include partner records.</p>
+                            </div>
                             <span className="rounded-full bg-white px-3 py-1 text-xs font-black text-stone-400 shadow-sm">
                                 {visibleTransactions.length} records
                             </span>
@@ -1528,8 +1656,14 @@ export default function FinanceTracker() {
                                 {visibleTransactions.map((transaction) => {
                                     const isPositive = transaction.amount >= 0
                                     const isOwnRecord = transaction.source.user_id === userId
-                                    const expenseOwner =
-                                        transaction.kind === 'expense' ? getExpenseOwner(transaction.source.user_id) : null
+                                    const transactionOwner =
+                                        transaction.kind === 'expense'
+                                            ? getExpenseOwner(transaction.source.user_id)
+                                            : { name: userName, relation: 'me' as const }
+                                    const savingsSource =
+                                        transaction.kind === 'savings' && (transaction.source as SavingsTransactionRow).type === 'deposit'
+                                            ? savingsSourceLabel((transaction.source as SavingsTransactionRow).source)
+                                            : null
                                     const badge =
                                         transaction.kind === 'expense'
                                             ? 'Expense'
@@ -1538,6 +1672,7 @@ export default function FinanceTracker() {
                                                 : (transaction.source as SavingsTransactionRow).type === 'withdrawal'
                                                     ? 'Withdrawal'
                                                     : 'Deposit'
+                                    const badgeText = savingsSource ? `${badge} · ${savingsSource}` : badge
 
                                     return (
                                         <div
@@ -1556,7 +1691,7 @@ export default function FinanceTracker() {
                                                         <div className="min-w-0">
                                                             <p className="truncate font-black text-stone-800">{transaction.title}</p>
                                                             <p className="mt-1 text-xs font-bold text-stone-400">
-                                                                {badge} · {transaction.date}
+                                                                {badgeText} · {transaction.date}
                                                             </p>
                                                         </div>
                                                         <p
@@ -1572,18 +1707,14 @@ export default function FinanceTracker() {
                                                         </p>
                                                     ) : null}
                                                     <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-                                                        {expenseOwner ? (
-                                                            <span
-                                                                className={`rounded-2xl px-3 py-1 text-[11px] font-black ${expenseOwner.relation === 'me'
-                                                                    ? 'bg-stone-50 text-stone-500'
-                                                                    : 'bg-sky-50 text-sky-700'
-                                                                    }`}
-                                                            >
-                                                                {expenseOwner.relation === 'me' ? 'Me' : 'Partner'} · {expenseOwner.name}
-                                                            </span>
-                                                        ) : (
-                                                            <span />
-                                                        )}
+                                                        <span
+                                                            className={`rounded-2xl px-3 py-1 text-[11px] font-black ${transactionOwner.relation === 'me'
+                                                                ? 'bg-stone-50 text-stone-500'
+                                                                : 'bg-sky-50 text-sky-700'
+                                                                }`}
+                                                        >
+                                                            {transactionOwner.relation === 'me' ? 'Me' : 'Partner'} · {transactionOwner.name}
+                                                        </span>
 
                                                         {isOwnRecord ? (
                                                             <div className="flex gap-2">
@@ -1758,10 +1889,23 @@ export default function FinanceTracker() {
                                             onClick={() => updateForm({ savingsType: 'withdrawal' })}
                                         />
                                     </div>
+                                    {form.savingsType === 'deposit' ? (
+                                        <SmallSelect
+                                            label="Savings source"
+                                            value={form.savingsSource}
+                                            onChange={(value) => updateForm({ savingsSource: normalizeSavingsSource(value) })}
+                                        >
+                                            {SAVINGS_SOURCE_OPTIONS.map((option) => (
+                                                <option key={option.value} value={option.value}>
+                                                    {option.label}
+                                                </option>
+                                            ))}
+                                        </SmallSelect>
+                                    ) : null}
                                     {savingsAccounts.length > 0 ? (
                                         <SmallSelect
                                             label="Savings account"
-                                            value={form.accountId || savingsAccounts[0]?.id || ''}
+                                            value={form.accountId}
                                             onChange={(value) => updateForm({ accountId: value })}
                                         >
                                             {savingsAccounts.map((account) => (
@@ -1784,6 +1928,11 @@ export default function FinanceTracker() {
                                                 </option>
                                             ))}
                                         </SmallSelect>
+                                    ) : null}
+                                    {form.savingsType === 'withdrawal' && form.accountId ? (
+                                        <div className="rounded-2xl bg-sky-50 px-4 py-3 text-xs font-black text-sky-700">
+                                            Available: RM {money(savingsAccountBalances[form.accountId] ?? 0)}
+                                        </div>
                                     ) : null}
                                 </>
                             ) : null}

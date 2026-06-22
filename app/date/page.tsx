@@ -3,7 +3,7 @@
 'use client'
 
 import { createBrowserClient } from '@supabase/ssr'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import AppShell from '../components/AppShell'
 
 type TotalsByUser = { user_id: string; total: number; owner_name?: string | null; owner_relation?: 'me' | 'partner' }
@@ -122,12 +122,12 @@ export default function DatePage() {
     const scrollRef = useRef<HTMLDivElement | null>(null)
     const loadMoreRef = useRef<HTMLDivElement | null>(null)
 
-    async function apiFetch(path: string, token: string) {
+    const apiFetch = useCallback(async (path: string, token: string) => {
         const res = await fetch(path, { headers: { Authorization: `Bearer ${token}` } })
         const json = await res.json()
         if (!res.ok) throw new Error(json?.error ?? 'Request failed')
         return json
-    }
+    }, [])
 
     function payerLabel(userId: string, ownerName?: string | null, ownerRelation?: 'me' | 'partner') {
         if (myUserId && userId === myUserId) return { label: 'You paid', emoji: '🧍' }
@@ -136,7 +136,7 @@ export default function DatePage() {
     }
 
     async function fetchAvailableMonths(token: string) {
-        const json = await apiFetch(`/api/expenses/summary?action=availableMonths&scope=all&onlyDating=1`, token)
+        const json = await apiFetch(`/api/expenses/summary?action=availableMonths&scope=combined&onlyDating=1`, token)
         const months = Array.isArray(json?.months) ? json.months : []
         setAvailableMonths(months)
 
@@ -188,7 +188,7 @@ export default function DatePage() {
         }
 
         const json = await apiFetch(
-            `/api/expenses/summary?action=availableDays&scope=all&onlyDating=1&year=${selectedYear}&month=${pad2(Number(selectedMonth))}`,
+            `/api/expenses/summary?action=availableDays&scope=combined&onlyDating=1&year=${selectedYear}&month=${pad2(Number(selectedMonth))}`,
             token
         )
         const days = Array.isArray(json?.days) ? json.days : []
@@ -210,7 +210,7 @@ export default function DatePage() {
         const dayParam = selectedDay === 'all' ? 'all' : pad2(Number(selectedDay))
 
         const json = await apiFetch(
-            `/api/expenses/summary?scope=all&onlyDating=1&year=${selectedYear}&month=${monthParam}&day=${dayParam}`,
+            `/api/expenses/summary?scope=combined&onlyDating=1&year=${selectedYear}&month=${monthParam}&day=${dayParam}`,
             token
         )
 
@@ -223,14 +223,14 @@ export default function DatePage() {
         const dayParam = selectedDay === 'all' ? 'all' : pad2(Number(selectedDay))
 
         const json = await apiFetch(
-            `/api/expenses/summary?action=count&scope=all&onlyDating=1&year=${selectedYear}&month=${monthParam}&day=${dayParam}`,
+            `/api/expenses/summary?action=count&scope=combined&onlyDating=1&year=${selectedYear}&month=${monthParam}&day=${dayParam}`,
             token
         )
 
         setTotalCount(Number(json?.count) || 0)
     }
 
-    async function fetchTransactionsPage(token: string, pageIndex: number, mode: 'replace' | 'append') {
+    const fetchTransactionsPage = useCallback(async (token: string, pageIndex: number, mode: 'replace' | 'append') => {
         if (loadingMore) return
         setLoadingMore(true)
 
@@ -238,7 +238,7 @@ export default function DatePage() {
         const dayParam = selectedDay === 'all' ? 'all' : pad2(Number(selectedDay))
 
         const json = await apiFetch(
-            `/api/expenses/summary?action=transactions&scope=all&onlyDating=1&year=${selectedYear}&month=${monthParam}&day=${dayParam}&page=${pageIndex}&limit=${PAGE_SIZE}`,
+            `/api/expenses/summary?action=transactions&scope=combined&onlyDating=1&year=${selectedYear}&month=${monthParam}&day=${dayParam}&page=${pageIndex}&limit=${PAGE_SIZE}`,
             token
         )
 
@@ -250,7 +250,7 @@ export default function DatePage() {
         setPage(pageIndex)
         setHasMore(Boolean(json?.hasMore))
         setLoadingMore(false)
-    }
+    }, [apiFetch, loadingMore, selectedDay, selectedMonth, selectedYear])
 
     // Main load + refresh on selection changes
     useEffect(() => {
@@ -327,7 +327,7 @@ export default function DatePage() {
 
         obs.observe(targetEl)
         return () => obs.disconnect()
-    }, [authToken, hasMore, loadingMore, page, selectedYear, selectedMonth, selectedDay])
+    }, [authToken, fetchTransactionsPage, hasMore, loadingMore, page, selectedYear, selectedMonth, selectedDay])
 
     // Build pills
     const meTotal = totalsByUser.find((t) => myUserId && t.user_id === myUserId)?.total ?? 0
@@ -343,7 +343,7 @@ export default function DatePage() {
                     <div className="rounded-[28px] bg-white/80 backdrop-blur border border-white shadow-[0_14px_45px_rgba(0,0,0,0.10)] p-5">
                         <div className="flex items-start justify-between gap-3">
                             <div>
-                                <div className="text-xs font-black uppercase tracking-widest text-stone-400">Couple dating total</div>
+                                <div className="text-xs font-black uppercase tracking-widest text-stone-400">Combined dating total</div>
                                 <div className="mt-2 text-3xl font-black text-stone-800 leading-none">RM {totalAll.toFixed(2)}</div>
                                 <div className="mt-2 text-xs font-bold text-stone-500">{monthLabel}</div>
                             </div>
@@ -416,7 +416,7 @@ export default function DatePage() {
                     {/* Who paid pills */}
                     <div className="rounded-[28px] bg-white/80 backdrop-blur border border-white shadow-[0_14px_45px_rgba(0,0,0,0.10)] p-5">
                         <div className="flex items-end justify-between">
-                            <h2 className="text-base font-black text-stone-800">Who pays the bill?</h2>
+                            <h2 className="text-base font-black text-stone-800">Separated totals</h2>
                             <span className="text-xs font-black text-rose-500 bg-rose-50 px-3 py-1 rounded-full">split</span>
                         </div>
 
@@ -424,8 +424,8 @@ export default function DatePage() {
                             <div className="py-10 text-center text-stone-500 font-bold">Loading... ✨</div>
                         ) : (
                             <div className="mt-4 grid grid-cols-1 gap-3">
-                                <Pill emoji="🧍" label="You" value={`RM ${Number(meTotal || 0).toFixed(2)}`} />
-                                <Pill emoji="🧑‍🤝‍🧑" label={partnerName} value={`RM ${Number(partnerTotal || 0).toFixed(2)}`} />
+                                <Pill emoji="🧍" label="My Total" value={`RM ${Number(meTotal || 0).toFixed(2)}`} />
+                                <Pill emoji="🧑‍🤝‍🧑" label={`${partnerName} Total`} value={`RM ${Number(partnerTotal || 0).toFixed(2)}`} />
                             </div>
                         )}
                     </div>

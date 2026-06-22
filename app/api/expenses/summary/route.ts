@@ -77,6 +77,7 @@ async function loadVisibleProfiles(
     currentUserId: string,
     scope: string
 ) {
+    const normalizedScope = scope.toLowerCase()
     const { data, error } = await supabase.rpc('finance_visible_profiles')
     const fallback = [{ user_id: currentUserId, display_name: null, relation: 'me' as const }]
 
@@ -92,15 +93,19 @@ async function loadVisibleProfiles(
 
     const profiles = allProfiles.length > 0 ? allProfiles : fallback
 
-    if (scope === 'me' || scope === 'self') {
+    if (normalizedScope === 'me' || normalizedScope === 'self' || normalizedScope === 'personal') {
         return profiles.filter((profile) => profile.user_id === currentUserId)
     }
 
-    if (scope === 'other') {
+    if (normalizedScope === 'other' || normalizedScope === 'partner') {
         return profiles.filter((profile) => profile.user_id !== currentUserId)
     }
 
-    return profiles
+    if (normalizedScope === 'all' || normalizedScope === 'couple' || normalizedScope === 'combined') {
+        return profiles
+    }
+
+    return profiles.filter((profile) => profile.user_id === currentUserId)
 }
 
 export async function GET(req: Request) {
@@ -130,7 +135,7 @@ export async function GET(req: Request) {
 
     const url = new URL(req.url)
     const action = url.searchParams.get('action')
-    const scope = url.searchParams.get('scope') ?? 'couple'
+    const scope = url.searchParams.get('scope') ?? 'me'
     const onlyDating =
         url.searchParams.get('onlyDating') === '1' || url.searchParams.get('onlyDating') === 'true'
     const userId = userRes.user.id

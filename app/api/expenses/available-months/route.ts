@@ -7,6 +7,25 @@ type ExpenseMonthRow = {
 
 type VisibleProfileRow = {
     user_id: string
+    relation?: 'me' | 'partner'
+}
+
+function scopedUserIds(rows: VisibleProfileRow[], currentUserId: string, scope: string) {
+    const profiles = rows.length > 0 ? rows : [{ user_id: currentUserId, relation: 'me' as const }]
+    const normalizedScope = scope.toLowerCase()
+
+    if (normalizedScope === 'all' || normalizedScope === 'couple' || normalizedScope === 'combined') {
+        return profiles.map((row) => String(row.user_id)).filter(Boolean)
+    }
+
+    if (normalizedScope === 'other' || normalizedScope === 'partner') {
+        return profiles
+            .filter((row) => String(row.user_id) !== currentUserId)
+            .map((row) => String(row.user_id))
+            .filter(Boolean)
+    }
+
+    return [currentUserId]
 }
 
 export async function GET(req: Request) {
@@ -34,16 +53,19 @@ export async function GET(req: Request) {
         return NextResponse.json({ error: 'Invalid token' }, { status: 401 })
     }
 
+    const url = new URL(req.url)
+    const scope = url.searchParams.get('scope') ?? 'me'
     const { data: visibleProfileRows } = await supabase.rpc('finance_visible_profiles')
-    const visibleUserIds = ((visibleProfileRows ?? []) as VisibleProfileRow[])
-        .map((row) => String(row.user_id))
-        .filter(Boolean)
-    const scopedUserIds = visibleUserIds.length > 0 ? visibleUserIds : [userRes.user.id]
+    const visibleUserIds = scopedUserIds((visibleProfileRows ?? []) as VisibleProfileRow[], userRes.user.id, scope)
+
+    if (visibleUserIds.length === 0) {
+        return NextResponse.json({ months: [] })
+    }
 
     const { data, error } = await supabase
         .from('expenses')
         .select('spent_at')
-        .in('user_id', scopedUserIds)
+        .in('user_id', visibleUserIds)
 
     if (error) {
         return NextResponse.json({ error: error.message }, { status: 500 })

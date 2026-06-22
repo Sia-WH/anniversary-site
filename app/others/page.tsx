@@ -38,7 +38,7 @@ function emojiForCategory(category: string) {
 function CuteSelect(props: {
     label?: string
     value: string
-    onChange: (e: any) => void
+    onChange: (value: string) => void
     children: React.ReactNode
 }) {
     return (
@@ -50,7 +50,7 @@ function CuteSelect(props: {
             ) : null}
             <select
                 value={props.value}
-                onChange={props.onChange}
+                onChange={(event) => props.onChange(event.target.value)}
                 className="w-full bg-white rounded-2xl px-4 py-3 border border-stone-100 font-black text-stone-700 shadow-sm focus:outline-none focus:ring-2 focus:ring-rose-200"
             >
                 {props.children}
@@ -133,7 +133,7 @@ export default function OthersPage() {
         }
 
         const y = Number(selectedYear)
-        const yearExists = months.some((m: any) => m.year === y)
+        const yearExists = months.some((m: { year: number; month: number }) => m.year === y)
         if (!yearExists) {
             const last = months[months.length - 1]
             setSelectedYear(String(last.year))
@@ -150,9 +150,11 @@ export default function OthersPage() {
         }
 
         const mo = Number(selectedMonth)
-        const monthExists = months.some((m: any) => m.year === y && m.month === mo)
+        const monthExists = months.some((m: { year: number; month: number }) => m.year === y && m.month === mo)
         if (!monthExists) {
-            const lastForYear = months.filter((m: any) => m.year === y).slice(-1)[0] ?? months[months.length - 1]
+            const lastForYear =
+                months.filter((m: { year: number; month: number }) => m.year === y).slice(-1)[0] ??
+                months[months.length - 1]
             setSelectedMonth(String(lastForYear.month))
             setSelectedDay('all')
             setAvailableDays([])
@@ -283,8 +285,8 @@ export default function OthersPage() {
                 await fetchTransactionsPage(token, 0, 'replace', userRes.user.id)
 
                 setLoading(false)
-            } catch (e: any) {
-                setErrorMsg(e?.message ?? 'Failed to load')
+            } catch (error) {
+                setErrorMsg(error instanceof Error ? error.message : 'Failed to load')
                 setLoading(false)
             }
         }
@@ -330,7 +332,7 @@ export default function OthersPage() {
                     <div className="rounded-[28px] bg-white/80 backdrop-blur border border-white shadow-[0_14px_45px_rgba(0,0,0,0.10)] p-5">
                         <div className="flex items-start justify-between gap-3">
                             <div>
-                                <div className="text-xs font-black uppercase tracking-widest text-stone-400">Total spending</div>
+                                <div className="text-xs font-black uppercase tracking-widest text-stone-400">Partner total spending</div>
                                 <div className="mt-2 text-3xl font-black text-stone-800 leading-none">RM {total.toFixed(2)}</div>
                                 <div className="mt-2 text-xs font-bold text-stone-500">{monthLabel}</div>
                             </div>
@@ -352,8 +354,7 @@ export default function OthersPage() {
                             <CuteSelect
                                 label="Year"
                                 value={selectedYear}
-                                onChange={(e: any) => {
-                                    const v = e.target.value
+                                onChange={(v) => {
                                     setSelectedYear(v)
                                     if (v === 'all') {
                                         setSelectedMonth('all')
@@ -374,8 +375,7 @@ export default function OthersPage() {
                             <CuteSelect
                                 label="Month"
                                 value={selectedMonth}
-                                onChange={(e: any) => {
-                                    const v = e.target.value
+                                onChange={(v) => {
                                     setSelectedMonth(v)
                                     if (v === 'all') setSelectedDay('all')
                                 }}
@@ -391,7 +391,7 @@ export default function OthersPage() {
                                     ))}
                             </CuteSelect>
 
-                            <CuteSelect label="Day" value={selectedDay} onChange={(e: any) => setSelectedDay(e.target.value)}>
+                            <CuteSelect label="Day" value={selectedDay} onChange={setSelectedDay}>
                                 <option value="all">All</option>
                                 {availableDays.map((d) => (
                                     <option key={d} value={String(d)}>

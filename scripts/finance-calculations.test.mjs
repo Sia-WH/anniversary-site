@@ -168,32 +168,3 @@ test('pagination metadata requests another page only after a full page', async (
         nextPage: 3,
     })
 })
-
-test('finance breakdown groups records by day month or year', async () => {
-    const { buildFinanceBreakdown } = await loadFinanceCalculations()
-    const rows = [
-        { date: '2026-06-01', amount: -100 },
-        { date: '2026-06-01', amount: 50 },
-        { date: '2026-06-02', amount: -20 },
-        { date: '2026-07-10', amount: -30 },
-        { date: '2025-12-31', amount: -40 },
-    ]
-
-    assert.deepEqual(buildFinanceBreakdown(rows, 'month'), [
-        { key: '2025-12-31', label: '31 Dec', amount: -40 },
-        { key: '2026-06-01', label: '01 Jun', amount: -50 },
-        { key: '2026-06-02', label: '02 Jun', amount: -20 },
-        { key: '2026-07-10', label: '10 Jul', amount: -30 },
-    ])
-
-    assert.deepEqual(buildFinanceBreakdown(rows, 'year'), [
-        { key: '2025-12', label: 'Dec 2025', amount: -40 },
-        { key: '2026-06', label: 'Jun 2026', amount: -70 },
-        { key: '2026-07', label: 'Jul 2026', amount: -30 },
-    ])
-
-    assert.deepEqual(buildFinanceBreakdown(rows, 'all'), [
-        { key: '2025', label: '2025', amount: -40 },
-        { key: '2026', label: '2026', amount: -100 },
-    ])
-})

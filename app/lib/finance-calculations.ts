@@ -219,37 +219,3 @@ export function getPaginationState(input: { received: number; pageSize: number; 
         nextPage: input.page + 1,
     }
 }
-
-export function buildFinanceBreakdown(rows: Array<{ date: string; amount: number }>, mode: FinanceFilterMode) {
-    const grouped = new Map<string, { label: string; amount: number }>()
-
-    rows.forEach((row) => {
-        const date = String(row.date).slice(0, 10)
-        const year = date.slice(0, 4)
-        const month = Number(date.slice(5, 7))
-        const day = date.slice(8, 10)
-        if (!year || !Number.isFinite(month) || month < 1 || month > 12) return
-
-        const key =
-            mode === 'all'
-                ? year
-                : mode === 'year'
-                    ? `${year}-${pad2(month)}`
-                    : date
-        const label =
-            mode === 'all'
-                ? year
-                : mode === 'year'
-                    ? `${MONTHS[month - 1]} ${year}`
-                    : `${day} ${MONTHS[month - 1]}`
-        const current = grouped.get(key)
-        grouped.set(key, {
-            label,
-            amount: (current?.amount ?? 0) + amount(row.amount),
-        })
-    })
-
-    return Array.from(grouped.entries())
-        .map(([key, value]) => ({ key, ...value }))
-        .sort((a, b) => a.key.localeCompare(b.key))
-}

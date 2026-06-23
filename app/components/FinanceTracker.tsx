@@ -2,7 +2,6 @@
 
 import {
     buildFinanceDateRange,
-    buildFinanceBreakdown,
     calculateFinanceTotals,
     calculateSavingsAccountBalances,
     calculateSavingsBalance,
@@ -1312,19 +1311,6 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
         return filtered.slice(0, 5)
     }, [historyFilter, historyRows, isDashboard, unifiedTransactions])
 
-    const breakdownRows = useMemo(() => {
-        if (isDashboard || filterMode === 'day') return []
-        const rows = [
-            ...expenseRows.map((row) => ({ date: row.spent_at, amount: -row.amount })),
-            ...incomeRows.map((row) => ({ date: row.received_at, amount: row.amount })),
-            ...savingsRows.map((row) => ({
-                date: row.saved_at,
-                amount: row.type === 'withdrawal' ? -row.amount : row.amount,
-            })),
-        ]
-        return buildFinanceBreakdown(rows, filterMode)
-    }, [expenseRows, filterMode, incomeRows, isDashboard, savingsRows])
-
     const budgetComparisons = useMemo(() => {
         const spentByCategory = new Map<string, number>()
         const spentByName = new Map<string, number>()
@@ -2004,35 +1990,6 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                         <TypeButton active label="Income" tone="emerald" onClick={() => openCreate('income')} />
                         <TypeButton active label="Savings" tone="sky" onClick={() => openCreate('savings')} />
                     </section>
-
-                    {!isDashboard && filterMode !== 'day' ? (
-                        <section className="space-y-3 rounded-[2rem] bg-white p-4 shadow-sm">
-                            <div>
-                                <h2 className="text-lg font-black text-stone-800">
-                                    {filterMode === 'month' ? 'Daily Breakdown' : filterMode === 'year' ? 'Monthly Breakdown' : 'Yearly Breakdown'}
-                                </h2>
-                                <p className="text-xs font-bold text-stone-400">
-                                    Net movement for the selected {dataScope} scope.
-                                </p>
-                            </div>
-                            {breakdownRows.length === 0 ? (
-                                <div className="rounded-3xl bg-stone-50 p-4 text-sm font-bold text-stone-400">
-                                    No breakdown data for this filter.
-                                </div>
-                            ) : (
-                                <div className="grid grid-cols-1 gap-2">
-                                    {breakdownRows.map((row) => (
-                                        <div key={row.key} className="flex items-center justify-between gap-3 rounded-3xl bg-stone-50 p-4">
-                                            <span className="font-black text-stone-700">{row.label}</span>
-                                            <span className={`shrink-0 font-black ${row.amount >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                                                {signedMoney(row.amount)}
-                                            </span>
-                                        </div>
-                                    ))}
-                                </div>
-                            )}
-                        </section>
-                    ) : null}
 
                     {isDashboard || dataScope === 'personal' ? (
                     <section className="space-y-3 rounded-[2rem] bg-white p-4 shadow-sm">

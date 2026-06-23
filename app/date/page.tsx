@@ -1,9 +1,13 @@
-
-
 'use client'
 
 import { createBrowserClient } from '@supabase/ssr'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+    mergeUniqueExpenseRows,
+    readExpensePageCache,
+    writeExpensePageCache,
+    type ExpensePageCacheInput,
+} from '../lib/expense-page-cache'
 import AppShell from '../components/AppShell'
 
 type TotalsByUser = { user_id: string; total: number; owner_name?: string | null; owner_relation?: 'me' | 'partner' }
@@ -19,6 +23,22 @@ type ExpenseRow = {
     is_for_partner?: boolean | null
     owner_name?: string | null
     owner_relation?: 'me' | 'partner'
+}
+
+type DatingBillsSnapshot = {
+    availableMonths: { year: number; month: number }[]
+    availableDays: number[]
+    totalAll: number
+    totalsByUser: TotalsByUser[]
+    totalCount: number
+    rows: ExpenseRow[]
+    page: number
+    hasMore: boolean
+}
+
+type ExpensePageRowsCache = {
+    rows: ExpenseRow[]
+    hasMore: boolean
 }
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
@@ -95,6 +115,7 @@ export default function DatePage() {
     const now = new Date()
 
     const [loading, setLoading] = useState(true)
+    const [refreshing, setRefreshing] = useState(false)
     const [errorMsg, setErrorMsg] = useState<string | null>(null)
 
     const [myUserId, setMyUserId] = useState<string | null>(null)
@@ -149,14 +170,36 @@ export default function DatePage() {
         return { label: 'Partner paid', emoji: '🧑‍🤝‍🧑' }
     }
 
-    async function fetchAvailableMonths(token: string) {
-        const json = await apiFetch(`/api/expenses/summary?action=availableMonths&scope=combined&onlyDating=1`, token)
-        const months = Array.isArray(json?.months) ? json.months : []
+    function cacheInputFor(activeUserId: string, pageIndex?: number): ExpensePageCacheInput {
+        return {
+            userId: activeUserId,
+            scope: 'dating',
+            year: selectedYear,
+            month: selectedMonth,
+            day: selectedDay,
+            page: pageIndex,
+        }
+    }
+
+    function applySnapshot(snapshot: DatingBillsSnapshot) {
+        setAvailableMonths(snapshot.availableMonths)
+        setAvailableDays(snapshot.availableDays)
+        setTotalAll(snapshot.totalAll)
+        setTotalsByUser(snapshot.totalsByUser)
+        setTotalCount(snapshot.totalCount)
+        setRows(snapshot.rows)
+        setPage(snapshot.page)
+        setHasMore(snapshot.hasMore)
+    }
+
+    function validateSelection(months: { year: number; month: number }[], days: number[]) {
         setAvailableMonths(months)
 
-        if (months.length === 0) return false
+        if (months.length === 0) {
+            setAvailableDays([])
+            return true
+        }
 
-        // enforce selection validity
         if (selectedYear === 'all') {
             if (selectedMonth !== 'all') setSelectedMonth('all')
             if (selectedDay !== 'all') setSelectedDay('all')
@@ -191,21 +234,6 @@ export default function DatePage() {
             return false
         }
 
-        return true
-    }
-
-    async function fetchAvailableDays(token: string) {
-        if (selectedYear === 'all' || selectedMonth === 'all') {
-            setAvailableDays([])
-            if (selectedDay !== 'all') setSelectedDay('all')
-            return true
-        }
-
-        const json = await apiFetch(
-            `/api/expenses/summary?action=availableDays&scope=combined&onlyDating=1&year=${selectedYear}&month=${pad2(Number(selectedMonth))}`,
-            token
-        )
-        const days = Array.isArray(json?.days) ? json.days : []
         setAvailableDays(days)
 
         if (selectedDay !== 'all') {
@@ -219,33 +247,37 @@ export default function DatePage() {
         return true
     }
 
-    async function fetchSummary(token: string) {
+    async function fetchOverview(token: string) {
         const monthParam = selectedMonth === 'all' ? 'all' : pad2(Number(selectedMonth))
         const dayParam = selectedDay === 'all' ? 'all' : pad2(Number(selectedDay))
 
-        const json = await apiFetch(
-            `/api/expenses/summary?scope=combined&onlyDating=1&year=${selectedYear}&month=${monthParam}&day=${dayParam}`,
+        return apiFetch(
+            `/api/expenses/summary?action=overview&scope=combined&onlyDating=1&year=${selectedYear}&month=${monthParam}&day=${dayParam}&page=0&limit=${PAGE_SIZE}`,
             token
         )
-
-        setTotalAll(Number(json?.total) || 0)
-        setTotalsByUser(Array.isArray(json?.totalsByUser) ? json.totalsByUser : [])
-    }
-
-    async function fetchTotalCount(token: string) {
-        const monthParam = selectedMonth === 'all' ? 'all' : pad2(Number(selectedMonth))
-        const dayParam = selectedDay === 'all' ? 'all' : pad2(Number(selectedDay))
-
-        const json = await apiFetch(
-            `/api/expenses/summary?action=count&scope=combined&onlyDating=1&year=${selectedYear}&month=${monthParam}&day=${dayParam}`,
-            token
-        )
-
-        setTotalCount(Number(json?.count) || 0)
     }
 
     const fetchTransactionsPage = useCallback(async (token: string, pageIndex: number, mode: 'replace' | 'append') => {
         if (loadingMore) return
+        const pageCacheInput: ExpensePageCacheInput | null = myUserId
+            ? {
+                userId: myUserId,
+                scope: 'dating',
+                year: selectedYear,
+                month: selectedMonth,
+                day: selectedDay,
+                page: pageIndex,
+            }
+            : null
+        const cachedPage = pageCacheInput ? readExpensePageCache<ExpensePageRowsCache>(pageCacheInput) : null
+        if (cachedPage) {
+            if (mode === 'replace') setRows(cachedPage.rows)
+            else setRows((prev) => mergeUniqueExpenseRows(prev, cachedPage.rows))
+            setPage(pageIndex)
+            setHasMore(cachedPage.hasMore)
+            return
+        }
+
         setLoadingMore(true)
 
         try {
@@ -260,20 +292,25 @@ export default function DatePage() {
             const list: ExpenseRow[] = Array.isArray(json?.rows) ? json.rows : []
 
             if (mode === 'replace') setRows(list)
-            else setRows((prev) => [...prev, ...list])
+            else setRows((prev) => mergeUniqueExpenseRows(prev, list))
 
             setPage(pageIndex)
             setHasMore(Boolean(json?.hasMore))
+            if (pageCacheInput) {
+                writeExpensePageCache(pageCacheInput, {
+                    rows: list,
+                    hasMore: Boolean(json?.hasMore),
+                })
+            }
         } finally {
             setLoadingMore(false)
         }
-    }, [apiFetch, loadingMore, selectedDay, selectedMonth, selectedYear])
+    }, [apiFetch, loadingMore, myUserId, selectedDay, selectedMonth, selectedYear])
 
     // Main load + refresh on selection changes
     useEffect(() => {
         const load = async () => {
             try {
-                setLoading(true)
                 setErrorMsg(null)
                 const seq = ++loadSeqRef.current
 
@@ -296,36 +333,56 @@ export default function DatePage() {
                 setAuthToken(token)
                 setMyUserId(userRes.user.id)
 
-                const okMonths = await fetchAvailableMonths(token)
-                if (!okMonths) {
+                const cacheInput = cacheInputFor(userRes.user.id)
+                const cached = readExpensePageCache<DatingBillsSnapshot>(cacheInput)
+                if (cached) {
+                    applySnapshot(cached)
                     setLoading(false)
-                    return
+                    setRefreshing(true)
+                } else {
+                    setLoading(true)
+                    setRefreshing(false)
                 }
 
-                const okDays = await fetchAvailableDays(token)
-                if (!okDays) {
+                const json = await fetchOverview(token)
+                const months = Array.isArray(json?.months) ? json.months : []
+                const days = Array.isArray(json?.days) ? json.days : []
+                const selectionStillValid = validateSelection(months, days)
+                if (!selectionStillValid) {
                     setLoading(false)
+                    setRefreshing(false)
                     return
                 }
 
                 if (seq !== loadSeqRef.current) {
                     setLoading(false)
+                    setRefreshing(false)
                     return
                 }
 
-                setHasMore(true)
-                setPage(0)
+                const nextSnapshot: DatingBillsSnapshot = {
+                    availableMonths: months,
+                    availableDays: selectedYear === 'all' || selectedMonth === 'all' ? [] : days,
+                    totalAll: Number(json?.total) || 0,
+                    totalsByUser: Array.isArray(json?.totalsByUser) ? json.totalsByUser : [],
+                    totalCount: Number(json?.count) || 0,
+                    rows: Array.isArray(json?.rows) ? json.rows : [],
+                    page: 0,
+                    hasMore: Boolean(json?.hasMore),
+                }
 
-                await Promise.all([
-                    fetchSummary(token),
-                    fetchTotalCount(token),
-                    fetchTransactionsPage(token, 0, 'replace'),
-                ])
-
+                applySnapshot(nextSnapshot)
+                writeExpensePageCache(cacheInput, nextSnapshot)
+                writeExpensePageCache(cacheInputFor(userRes.user.id, 0), {
+                    rows: nextSnapshot.rows,
+                    hasMore: nextSnapshot.hasMore,
+                })
                 setLoading(false)
+                setRefreshing(false)
             } catch (error) {
                 setErrorMsg(error instanceof Error ? error.message : 'Failed to load')
                 setLoading(false)
+                setRefreshing(false)
             }
         }
 
@@ -373,7 +430,14 @@ export default function DatePage() {
                             <div>
                                 <div className="text-xs font-black uppercase tracking-widest text-stone-400">Combined dating total</div>
                                 <div className="mt-2 text-3xl font-black text-stone-800 leading-none">RM {totalAll.toFixed(2)}</div>
-                                <div className="mt-2 text-xs font-bold text-stone-500">{monthLabel}</div>
+                                <div className="mt-2 flex flex-wrap items-center gap-2 text-xs font-bold text-stone-500">
+                                    <span>{monthLabel}</span>
+                                    {refreshing ? (
+                                        <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-black uppercase tracking-widest text-amber-600">
+                                            Updating
+                                        </span>
+                                    ) : null}
+                                </div>
                             </div>
 
                             <div className="rounded-2xl bg-rose-50 border border-rose-100 px-4 py-3 shadow-sm">

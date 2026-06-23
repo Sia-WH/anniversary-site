@@ -2,6 +2,12 @@
 
 import { createBrowserClient } from '@supabase/ssr'
 import { useEffect, useMemo, useRef, useState } from 'react'
+import {
+    mergeUniqueExpenseRows,
+    readExpensePageCache,
+    writeExpensePageCache,
+    type ExpensePageCacheInput,
+} from '../lib/expense-page-cache'
 import AppShell from '../components/AppShell'
 
 type CategoryTotal = { category: string; amount: number }
@@ -15,6 +21,21 @@ type ExpenseRow = {
     created_at?: string | null
     owner_name?: string | null
     owner_relation?: 'me' | 'partner'
+}
+
+type PartnerExpenseSnapshot = {
+    availableMonths: { year: number; month: number }[]
+    availableDays: number[]
+    total: number
+    categories: CategoryTotal[]
+    rows: ExpenseRow[]
+    page: number
+    hasMore: boolean
+}
+
+type ExpensePageRowsCache = {
+    rows: ExpenseRow[]
+    hasMore: boolean
 }
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
@@ -85,6 +106,7 @@ export default function OthersPage() {
     const now = new Date()
 
     const [loading, setLoading] = useState(true)
+    const [refreshing, setRefreshing] = useState(false)
     const [errorMsg, setErrorMsg] = useState<string | null>(null)
 
     const [userId, setUserId] = useState<string | null>(null)
@@ -132,14 +154,35 @@ export default function OthersPage() {
         return json
     }
 
-    async function fetchAvailableMonths(token: string) {
-        const json = await apiFetch(`/api/expenses/summary?action=availableMonths&scope=other`, token)
-        const months = Array.isArray(json?.months) ? json.months : []
+    function cacheInputFor(activeUserId: string, pageIndex?: number): ExpensePageCacheInput {
+        return {
+            userId: activeUserId,
+            scope: 'partner',
+            year: selectedYear,
+            month: selectedMonth,
+            day: selectedDay,
+            page: pageIndex,
+        }
+    }
+
+    function applySnapshot(snapshot: PartnerExpenseSnapshot) {
+        setAvailableMonths(snapshot.availableMonths)
+        setAvailableDays(snapshot.availableDays)
+        setTotal(snapshot.total)
+        setCategories(snapshot.categories)
+        setRows(snapshot.rows)
+        setPage(snapshot.page)
+        setHasMore(snapshot.hasMore)
+    }
+
+    function validateSelection(months: { year: number; month: number }[], days: number[]) {
         setAvailableMonths(months)
 
-        if (months.length === 0) return false
+        if (months.length === 0) {
+            setAvailableDays([])
+            return true
+        }
 
-        // enforce selection validity
         if (selectedYear === 'all') {
             if (selectedMonth !== 'all') setSelectedMonth('all')
             if (selectedDay !== 'all') setSelectedDay('all')
@@ -176,21 +219,6 @@ export default function OthersPage() {
             return false
         }
 
-        return true
-    }
-
-    async function fetchAvailableDays(token: string) {
-        if (selectedYear === 'all' || selectedMonth === 'all') {
-            setAvailableDays([])
-            if (selectedDay !== 'all') setSelectedDay('all')
-            return true
-        }
-
-        const json = await apiFetch(
-            `/api/expenses/summary?action=availableDays&scope=other&year=${selectedYear}&month=${pad2(Number(selectedMonth))}`,
-            token
-        )
-        const days = Array.isArray(json?.days) ? json.days : []
         setAvailableDays(days)
 
         if (selectedDay !== 'all') {
@@ -204,15 +232,14 @@ export default function OthersPage() {
         return true
     }
 
-    async function fetchSummary(token: string) {
+    async function fetchOverview(token: string) {
         const monthParam = selectedMonth === 'all' ? 'all' : pad2(Number(selectedMonth))
         const dayParam = selectedDay === 'all' ? 'all' : pad2(Number(selectedDay))
-        const json = await apiFetch(
-            `/api/expenses/summary?scope=other&year=${selectedYear}&month=${monthParam}&day=${dayParam}`,
+
+        return apiFetch(
+            `/api/expenses/summary?action=overview&scope=other&year=${selectedYear}&month=${monthParam}&day=${dayParam}&page=0&limit=${PAGE_SIZE}`,
             token
         )
-        setTotal(Number(json?.total) || 0)
-        setCategories(Array.isArray(json?.categories) ? json.categories : [])
     }
 
     async function fetchTransactionsPage(
@@ -224,6 +251,16 @@ export default function OthersPage() {
         const uid = uidOverride ?? userId
         if (!uid) return
         if (loadingMore) return
+
+        const pageCacheInput = cacheInputFor(uid, pageIndex)
+        const cachedPage = readExpensePageCache<ExpensePageRowsCache>(pageCacheInput)
+        if (cachedPage) {
+            if (mode === 'replace') setRows(cachedPage.rows)
+            else setRows((prev) => mergeUniqueExpenseRows(prev, cachedPage.rows))
+            setPage(pageIndex)
+            setHasMore(cachedPage.hasMore)
+            return
+        }
 
         setLoadingMore(true)
         try {
@@ -238,10 +275,14 @@ export default function OthersPage() {
             const list: ExpenseRow[] = Array.isArray(json?.rows) ? json.rows : []
 
             if (mode === 'replace') setRows(list)
-            else setRows((prev) => [...prev, ...list])
+            else setRows((prev) => mergeUniqueExpenseRows(prev, list))
 
             setPage(pageIndex)
             setHasMore(Boolean(json?.hasMore))
+            writeExpensePageCache(pageCacheInput, {
+                rows: list,
+                hasMore: Boolean(json?.hasMore),
+            })
         } finally {
             setLoadingMore(false)
         }
@@ -251,7 +292,6 @@ export default function OthersPage() {
     useEffect(() => {
         const load = async () => {
             try {
-                setLoading(true)
                 setErrorMsg(null)
                 const seq = ++loadSeqRef.current
 
@@ -273,38 +313,56 @@ export default function OthersPage() {
                 setAuthToken(token)
                 setUserId(userRes.user.id)
 
-                const okMonths = await fetchAvailableMonths(token)
-                // If months selection was auto-corrected via setState, stop here and let useEffect re-run
-                if (!okMonths) {
+                const cacheInput = cacheInputFor(userRes.user.id)
+                const cached = readExpensePageCache<PartnerExpenseSnapshot>(cacheInput)
+                if (cached) {
+                    applySnapshot(cached)
                     setLoading(false)
-                    return
+                    setRefreshing(true)
+                } else {
+                    setLoading(true)
+                    setRefreshing(false)
                 }
 
-                const okDays = await fetchAvailableDays(token)
-                // If day selection was auto-corrected via setState, stop here and let useEffect re-run
-                if (!okDays) {
+                const json = await fetchOverview(token)
+                const months = Array.isArray(json?.months) ? json.months : []
+                const days = Array.isArray(json?.days) ? json.days : []
+                const selectionStillValid = validateSelection(months, days)
+                if (!selectionStillValid) {
                     setLoading(false)
+                    setRefreshing(false)
                     return
                 }
 
                 // If a newer load started, stop this one (avoid stale state overwrites)
                 if (seq !== loadSeqRef.current) {
                     setLoading(false)
+                    setRefreshing(false)
                     return
                 }
 
-                // reset paging + load
-                setHasMore(true)
-                setPage(0)
-                await Promise.all([
-                    fetchSummary(token),
-                    fetchTransactionsPage(token, 0, 'replace', userRes.user.id),
-                ])
+                const nextSnapshot: PartnerExpenseSnapshot = {
+                    availableMonths: months,
+                    availableDays: selectedYear === 'all' || selectedMonth === 'all' ? [] : days,
+                    total: Number(json?.total) || 0,
+                    categories: Array.isArray(json?.categories) ? json.categories : [],
+                    rows: Array.isArray(json?.rows) ? json.rows : [],
+                    page: 0,
+                    hasMore: Boolean(json?.hasMore),
+                }
 
+                applySnapshot(nextSnapshot)
+                writeExpensePageCache(cacheInput, nextSnapshot)
+                writeExpensePageCache(cacheInputFor(userRes.user.id, 0), {
+                    rows: nextSnapshot.rows,
+                    hasMore: nextSnapshot.hasMore,
+                })
                 setLoading(false)
+                setRefreshing(false)
             } catch (error) {
                 setErrorMsg(error instanceof Error ? error.message : 'Failed to load')
                 setLoading(false)
+                setRefreshing(false)
             }
         }
 
@@ -355,7 +413,14 @@ export default function OthersPage() {
                             <div>
                                 <div className="text-xs font-black uppercase tracking-widest text-stone-400">Partner total expense</div>
                                 <div className="mt-2 text-3xl font-black text-stone-800 leading-none">RM {total.toFixed(2)}</div>
-                                <div className="mt-2 text-xs font-bold text-stone-500">{monthLabel}</div>
+                                <div className="mt-2 flex flex-wrap items-center gap-2 text-xs font-bold text-stone-500">
+                                    <span>{monthLabel}</span>
+                                    {refreshing ? (
+                                        <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-black uppercase tracking-widest text-amber-600">
+                                            Updating
+                                        </span>
+                                    ) : null}
+                                </div>
                             </div>
 
                             <div className="rounded-2xl bg-rose-50 border border-rose-100 px-4 py-3 shadow-sm">

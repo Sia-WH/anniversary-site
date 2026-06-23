@@ -1,10 +1,17 @@
 'use client'
 
 import {
+    buildFinanceDateRange,
+    buildFinanceBreakdown,
     calculateFinanceTotals,
     calculateSavingsAccountBalances,
     calculateSavingsBalance,
+    createFinanceCacheKey,
+    getPaginationState,
     getAvailableBalanceForWithdrawal,
+    type FinanceFilterMode,
+    type FinanceScope,
+    type FinanceTransactionType,
     type SavingsAction,
     type SavingsSource,
 } from '@/app/lib/finance-calculations'
@@ -13,6 +20,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import AppShell from './AppShell'
 
 type TransactionKind = 'expense' | 'income' | 'savings'
+type FinanceSurface = 'dashboard' | 'tracker'
 
 type CategoryRow = {
     id: string
@@ -113,6 +121,7 @@ type FinanceSnapshot = {
     savedAt: number
     visibleProfiles: VisibleProfile[]
     availableMonths: AvailableMonth[]
+    availableDays: number[]
     expenseCategories: CategoryRow[]
     incomeCategories: CategoryRow[]
     savingsAccounts: SavingsAccountRow[]
@@ -199,6 +208,7 @@ type VisibleProfileDbRow = {
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 const CACHE_TTL_MS = 1000 * 60 * 5
 const MAX_MONTH_SOURCE_ROWS = 750
+const HISTORY_PAGE_SIZE = 10
 
 const DEFAULT_EXPENSE_CATEGORIES = ['Food', 'Transport', 'Entertainment', 'Shopping', 'Bills', 'Dating', 'Others']
 const DEFAULT_INCOME_CATEGORIES = ['Salary', 'Freelance', 'Business', 'Bonus', 'Other']
@@ -224,18 +234,6 @@ function normalizeName(value: string) {
 function toNumber(value: unknown) {
     const parsed = Number(value)
     return Number.isFinite(parsed) ? parsed : 0
-}
-
-function getMonthRange(year: string, month: string) {
-    const y = Number(year)
-    const m = Number(month)
-    const start = new Date(Date.UTC(y, m - 1, 1))
-    const end = new Date(Date.UTC(y, m, 1))
-
-    return {
-        startISO: start.toISOString().slice(0, 10),
-        endISO: end.toISOString().slice(0, 10),
-    }
 }
 
 function monthLabel(year: string, month: string) {
@@ -278,16 +276,37 @@ function colorForName(name: string) {
     return `hsl(${hue}, 78%, 67%)`
 }
 
-function cacheKey(userId: string, visibleUserIds: string[], year: string, month: string) {
-    const scope = Array.from(new Set([userId, ...visibleUserIds])).sort().join(',')
-    return `finance:v4:personal-dashboard+shared-expenses:${userId}:${scope}:${year}-${pad2(Number(month))}`
+function cacheKey(input: {
+    userId: string
+    visibleUserIds: string[]
+    surface: FinanceSurface
+    scope: FinanceScope
+    mode: FinanceFilterMode
+    year: string
+    month: string
+    day: string
+    transactionType?: FinanceTransactionType
+    page?: number
+}) {
+    return createFinanceCacheKey({
+        userId: input.userId,
+        visibleUserIds: input.visibleUserIds,
+        surface: input.surface,
+        scope: input.scope,
+        mode: input.mode,
+        year: input.year,
+        month: input.month,
+        day: input.day,
+        transactionType: input.transactionType ?? 'all',
+        page: input.page,
+    })
 }
 
-function readSnapshot(userId: string, visibleUserIds: string[], year: string, month: string) {
+function readSnapshot(input: Parameters<typeof cacheKey>[0]) {
     if (typeof window === 'undefined') return null
 
     try {
-        const raw = window.localStorage.getItem(cacheKey(userId, visibleUserIds, year, month))
+        const raw = window.localStorage.getItem(cacheKey(input))
         if (!raw) return null
 
         const parsed = JSON.parse(raw) as FinanceSnapshot
@@ -298,18 +317,12 @@ function readSnapshot(userId: string, visibleUserIds: string[], year: string, mo
     }
 }
 
-function writeSnapshot(
-    userId: string,
-    visibleUserIds: string[],
-    year: string,
-    month: string,
-    snapshot: Omit<FinanceSnapshot, 'savedAt'>
-) {
+function writeSnapshot(input: Parameters<typeof cacheKey>[0], snapshot: Omit<FinanceSnapshot, 'savedAt'>) {
     if (typeof window === 'undefined') return
 
     try {
         window.localStorage.setItem(
-            cacheKey(userId, visibleUserIds, year, month),
+            cacheKey(input),
             JSON.stringify({
                 ...snapshot,
                 savedAt: Date.now(),
@@ -476,14 +489,18 @@ function SummaryCard({
     )
 }
 
-export default function FinanceTracker() {
+export default function FinanceTracker({ surface = 'tracker' }: { surface?: FinanceSurface }) {
     const supabase = supabaseBrowser()
     const now = useMemo(() => new Date(), [])
+    const isDashboard = surface === 'dashboard'
 
     const [userId, setUserId] = useState<string | null>(null)
     const [userName, setUserName] = useState('User')
+    const [filterMode, setFilterMode] = useState<FinanceFilterMode>(isDashboard ? 'month' : 'month')
+    const [dataScope, setDataScope] = useState<FinanceScope>('personal')
     const [selectedYear, setSelectedYear] = useState(String(now.getFullYear()))
     const [selectedMonth, setSelectedMonth] = useState(String(now.getMonth() + 1))
+    const [selectedDay, setSelectedDay] = useState(String(now.getDate()))
 
     const [loading, setLoading] = useState(true)
     const [refreshing, setRefreshing] = useState(false)
@@ -494,6 +511,7 @@ export default function FinanceTracker() {
     const [availableMonths, setAvailableMonths] = useState<AvailableMonth[]>([
         { year: now.getFullYear(), month: now.getMonth() + 1 },
     ])
+    const [availableDays, setAvailableDays] = useState<number[]>([now.getDate()])
     const [visibleProfiles, setVisibleProfiles] = useState<VisibleProfile[]>([])
     const [expenseCategories, setExpenseCategories] = useState<CategoryRow[]>([])
     const [incomeCategories, setIncomeCategories] = useState<CategoryRow[]>([])
@@ -519,8 +537,16 @@ export default function FinanceTracker() {
     const [budgetNewCategory, setBudgetNewCategory] = useState('')
     const [budgetAmount, setBudgetAmount] = useState('')
     const [historyFilter, setHistoryFilter] = useState<'all' | TransactionKind>('all')
+    const [historyRows, setHistoryRows] = useState<UnifiedTransaction[]>([])
+    const [historyPage, setHistoryPage] = useState(0)
+    const [historyHasMore, setHistoryHasMore] = useState(false)
+    const [historyLoading, setHistoryLoading] = useState(false)
+    const [historyLoadingMore, setHistoryLoadingMore] = useState(false)
 
     const loadSeqRef = useRef(0)
+    const historyLoadSeqRef = useRef(0)
+    const scrollRef = useRef<HTMLDivElement | null>(null)
+    const loadMoreRef = useRef<HTMLDivElement | null>(null)
 
     const expenseCategoryOptions = useMemo(
         () => mergeNames(DEFAULT_EXPENSE_CATEGORIES, expenseCategories),
@@ -538,6 +564,7 @@ export default function FinanceTracker() {
     const applySnapshot = useCallback((snapshot: Omit<FinanceSnapshot, 'savedAt'>) => {
         setVisibleProfiles(snapshot.visibleProfiles)
         setAvailableMonths(snapshot.availableMonths)
+        setAvailableDays(snapshot.availableDays)
         setExpenseCategories(snapshot.expenseCategories)
         setIncomeCategories(snapshot.incomeCategories)
         setSavingsAccounts(snapshot.savingsAccounts)
@@ -549,6 +576,21 @@ export default function FinanceTracker() {
         setSavingsAccountBalances(snapshot.savingsAccountBalances)
         setTotalSavingsBalance(snapshot.totalSavingsBalance)
     }, [])
+
+    const getScopedUserIds = useCallback(
+        (profiles: VisibleProfile[], scope: FinanceScope) => {
+            if (!userId) return []
+            if (scope === 'personal') return [userId]
+
+            const partnerIds = profiles
+                .filter((profile) => profile.relation === 'partner' && profile.user_id !== userId)
+                .map((profile) => profile.user_id)
+
+            if (scope === 'partner') return partnerIds
+            return Array.from(new Set([userId, ...partnerIds])).filter(Boolean)
+        },
+        [userId]
+    )
 
     const getExpenseOwner = useCallback(
         (ownerUserId: string) => {
@@ -589,8 +631,26 @@ export default function FinanceTracker() {
             const seq = ++loadSeqRef.current
             const loadedProfiles = await loadVisibleProfiles()
             const visibleUserIds = Array.from(new Set([userId, ...loadedProfiles.map((profile) => profile.user_id)])).filter(Boolean)
+            const activeScope: FinanceScope = isDashboard ? 'personal' : dataScope
+            const scopedUserIds = getScopedUserIds(loadedProfiles, activeScope)
+            const activeRange = buildFinanceDateRange({
+                mode: isDashboard ? 'month' : filterMode,
+                year: selectedYear,
+                month: selectedMonth,
+                day: selectedDay,
+            })
+            const cacheInput = {
+                userId,
+                visibleUserIds,
+                surface,
+                scope: activeScope,
+                mode: isDashboard ? ('month' as const) : filterMode,
+                year: selectedYear,
+                month: selectedMonth,
+                day: selectedDay,
+            }
             const shouldUseCache = !options?.force
-            const cached = shouldUseCache ? readSnapshot(userId, visibleUserIds, selectedYear, selectedMonth) : null
+            const cached = shouldUseCache ? readSnapshot(cacheInput) : null
 
             if (cached) {
                 applySnapshot(cached)
@@ -602,9 +662,18 @@ export default function FinanceTracker() {
                 if (loading) setErrorMsg(null)
             }
 
-            const { startISO, endISO } = getMonthRange(selectedYear, selectedMonth)
+            const applyRange = <T extends { gte: (column: string, value: string) => T; lt: (column: string, value: string) => T }>(
+                query: T,
+                column: string
+            ) => {
+                if (activeRange.startISO && activeRange.endISO) {
+                    return query.gte(column, activeRange.startISO).lt(column, activeRange.endISO)
+                }
+                return query
+            }
 
             try {
+                const emptyRows = Promise.resolve({ data: [], error: null })
                 const [
                     expenseMonthsRes,
                     incomeMonthsRes,
@@ -618,12 +687,14 @@ export default function FinanceTracker() {
                     savingsRowsRes,
                     savingsAllRowsRes,
                 ] = await Promise.all([
-                    supabase
-                        .from('expenses')
-                        .select('spent_at')
-                        .in('user_id', visibleUserIds)
-                        .order('spent_at', { ascending: false })
-                        .limit(MAX_MONTH_SOURCE_ROWS),
+                    scopedUserIds.length > 0
+                        ? supabase
+                            .from('expenses')
+                            .select('spent_at')
+                            .in('user_id', scopedUserIds)
+                            .order('spent_at', { ascending: false })
+                            .limit(MAX_MONTH_SOURCE_ROWS)
+                        : emptyRows,
                     supabase
                         .from('incomes')
                         .select('received_at')
@@ -656,30 +727,39 @@ export default function FinanceTracker() {
                         .select('id, user_id, category_id, monthly_limit, is_active, expense_categories(id, name)')
                         .eq('user_id', userId)
                         .eq('is_active', true),
-                    supabase
-                        .from('expenses')
-                        .select('id, user_id, amount, category, category_id, description, spent_at, created_at, is_dating, is_for_partner')
-                        .in('user_id', visibleUserIds)
-                        .gte('spent_at', startISO)
-                        .lt('spent_at', endISO)
-                        .order('spent_at', { ascending: false })
-                        .order('created_at', { ascending: false }),
-                    supabase
-                        .from('incomes')
-                        .select('id, user_id, amount, category, category_id, description, received_at, created_at')
-                        .eq('user_id', userId)
-                        .gte('received_at', startISO)
-                        .lt('received_at', endISO)
-                        .order('received_at', { ascending: false })
-                        .order('created_at', { ascending: false }),
-                    supabase
-                        .from('savings_transactions')
-                        .select('id, user_id, account_id, amount, type, source, description, saved_at, created_at, savings_accounts(name)')
-                        .eq('user_id', userId)
-                        .gte('saved_at', startISO)
-                        .lt('saved_at', endISO)
-                        .order('saved_at', { ascending: false })
-                        .order('created_at', { ascending: false }),
+                    scopedUserIds.length > 0
+                        ? applyRange(
+                            supabase
+                                .from('expenses')
+                                .select('id, user_id, amount, category, category_id, description, spent_at, created_at, is_dating, is_for_partner')
+                                .in('user_id', scopedUserIds),
+                            'spent_at'
+                        )
+                            .order('spent_at', { ascending: false })
+                            .order('created_at', { ascending: false })
+                        : emptyRows,
+                    activeScope === 'personal'
+                        ? applyRange(
+                            supabase
+                                .from('incomes')
+                                .select('id, user_id, amount, category, category_id, description, received_at, created_at')
+                                .eq('user_id', userId),
+                            'received_at'
+                        )
+                            .order('received_at', { ascending: false })
+                            .order('created_at', { ascending: false })
+                        : emptyRows,
+                    activeScope === 'personal'
+                        ? applyRange(
+                            supabase
+                                .from('savings_transactions')
+                                .select('id, user_id, account_id, amount, type, source, description, saved_at, created_at, savings_accounts(name)')
+                                .eq('user_id', userId),
+                            'saved_at'
+                        )
+                            .order('saved_at', { ascending: false })
+                            .order('created_at', { ascending: false })
+                        : emptyRows,
                     supabase
                         .from('savings_transactions')
                         .select('id, user_id, account_id, amount, type, source, description, saved_at, created_at, savings_accounts(name)')
@@ -733,6 +813,18 @@ export default function FinanceTracker() {
                 incomeMonthRows.forEach((row) => addMonth(row.received_at))
                 savingsMonthRows.forEach((row) => addMonth(row.saved_at))
 
+                const daySet = new Set<number>()
+                const addAvailableDay = (date: unknown) => {
+                    if (!date) return
+                    const [yearPart, monthPart] = String(date).slice(0, 10).split('-')
+                    if (yearPart !== selectedYear || Number(monthPart) !== Number(selectedMonth)) return
+                    const day = Number(String(date).slice(8, 10))
+                    if (Number.isFinite(day)) daySet.add(day)
+                }
+                expenseMonthRows.forEach((row) => addAvailableDay(row.spent_at))
+                incomeMonthRows.forEach((row) => addAvailableDay(row.received_at))
+                savingsMonthRows.forEach((row) => addAvailableDay(row.saved_at))
+
                 const mappedAllSavingsRows = allSavingsTransactionRows.map((row) => ({
                     id: String(row.id),
                     user_id: String(row.user_id),
@@ -753,6 +845,7 @@ export default function FinanceTracker() {
                     availableMonths: Array.from(monthMap.values()).sort((a, b) =>
                         a.year === b.year ? b.month - a.month : b.year - a.year
                     ),
+                    availableDays: Array.from(daySet).sort((a, b) => a - b),
                     expenseCategories: expenseCategoryRows.map((row) => ({
                         id: String(row.id),
                         name: String(row.name),
@@ -818,7 +911,7 @@ export default function FinanceTracker() {
                 if (seq !== loadSeqRef.current) return
 
                 applySnapshot(nextSnapshot)
-                writeSnapshot(userId, visibleUserIds, selectedYear, selectedMonth, nextSnapshot)
+                writeSnapshot(cacheInput, nextSnapshot)
                 setUsedCache(false)
                 setErrorMsg(null)
             } catch (error) {
@@ -831,7 +924,22 @@ export default function FinanceTracker() {
                 }
             }
         },
-        [applySnapshot, loadVisibleProfiles, loading, now, selectedMonth, selectedYear, supabase, userId]
+        [
+            applySnapshot,
+            dataScope,
+            filterMode,
+            getScopedUserIds,
+            isDashboard,
+            loadVisibleProfiles,
+            loading,
+            now,
+            selectedDay,
+            selectedMonth,
+            selectedYear,
+            supabase,
+            surface,
+            userId,
+        ]
     )
 
     useEffect(() => {
@@ -860,6 +968,220 @@ export default function FinanceTracker() {
         loadFinanceData()
     }, [loadFinanceData, userId])
 
+    const loadHistoryPage = useCallback(
+        async (pageIndex: number) => {
+            if (!userId) return
+
+            const seq = ++historyLoadSeqRef.current
+            const isFirstPage = pageIndex === 0
+            if (isFirstPage) setHistoryLoading(true)
+            else setHistoryLoadingMore(true)
+
+            try {
+                const loadedProfiles = visibleProfiles.length > 0 ? visibleProfiles : await loadVisibleProfiles()
+                const visibleUserIds = Array.from(new Set([userId, ...loadedProfiles.map((profile) => profile.user_id)])).filter(Boolean)
+                const activeScope: FinanceScope = isDashboard ? 'personal' : dataScope
+                const scopedUserIds = getScopedUserIds(loadedProfiles, activeScope)
+                const range = buildFinanceDateRange({
+                    mode: isDashboard ? 'month' : filterMode,
+                    year: selectedYear,
+                    month: selectedMonth,
+                    day: selectedDay,
+                })
+                const cumulativeLimit = (pageIndex + 1) * HISTORY_PAGE_SIZE
+                const queryType = historyFilter as FinanceTransactionType
+
+                const historyCacheKey = cacheKey({
+                    userId,
+                    visibleUserIds,
+                    surface,
+                    scope: activeScope,
+                    mode: isDashboard ? 'month' : filterMode,
+                    year: selectedYear,
+                    month: selectedMonth,
+                    day: selectedDay,
+                    transactionType: queryType,
+                    page: pageIndex,
+                })
+
+                if (typeof window !== 'undefined' && isFirstPage) {
+                    window.localStorage.removeItem(historyCacheKey)
+                }
+
+                const applyDateRange = <T extends { gte: (column: string, value: string) => T; lt: (column: string, value: string) => T }>(
+                    query: T,
+                    column: string
+                ) => {
+                    if (range.startISO && range.endISO) return query.gte(column, range.startISO).lt(column, range.endISO)
+                    return query
+                }
+
+                const emptyRows = Promise.resolve({ data: [], error: null })
+                const shouldLoadExpenses = queryType === 'all' || queryType === 'expense'
+                const shouldLoadIncome = activeScope === 'personal' && (queryType === 'all' || queryType === 'income')
+                const shouldLoadSavings = activeScope === 'personal' && (queryType === 'all' || queryType === 'savings')
+
+                const [expenseRes, incomeRes, savingsRes] = await Promise.all([
+                    shouldLoadExpenses && scopedUserIds.length > 0
+                        ? applyDateRange(
+                            supabase
+                                .from('expenses')
+                                .select('id, user_id, amount, category, category_id, description, spent_at, created_at, is_dating, is_for_partner')
+                                .in('user_id', scopedUserIds),
+                            'spent_at'
+                        )
+                            .order('spent_at', { ascending: false })
+                            .order('created_at', { ascending: false })
+                            .range(0, cumulativeLimit - 1)
+                        : emptyRows,
+                    shouldLoadIncome
+                        ? applyDateRange(
+                            supabase
+                                .from('incomes')
+                                .select('id, user_id, amount, category, category_id, description, received_at, created_at')
+                                .eq('user_id', userId),
+                            'received_at'
+                        )
+                            .order('received_at', { ascending: false })
+                            .order('created_at', { ascending: false })
+                            .range(0, cumulativeLimit - 1)
+                        : emptyRows,
+                    shouldLoadSavings
+                        ? applyDateRange(
+                            supabase
+                                .from('savings_transactions')
+                                .select('id, user_id, account_id, amount, type, source, description, saved_at, created_at, savings_accounts(name)')
+                                .eq('user_id', userId),
+                            'saved_at'
+                        )
+                            .order('saved_at', { ascending: false })
+                            .order('created_at', { ascending: false })
+                            .range(0, cumulativeLimit - 1)
+                        : emptyRows,
+                ])
+
+                const firstError = [expenseRes.error, incomeRes.error, savingsRes.error].find(Boolean)
+                if (firstError) throw firstError
+
+                const expenses = ((expenseRes.data ?? []) as ExpenseDbRow[]).map((row) => ({
+                    id: String(row.id),
+                    kind: 'expense' as const,
+                    title: row.category ? String(row.category) : 'Expense',
+                    description: row.description ? String(row.description) : null,
+                    date: String(row.spent_at),
+                    amount: -toNumber(row.amount),
+                    created_at: row.created_at ? String(row.created_at) : null,
+                    source: {
+                        id: String(row.id),
+                        user_id: String(row.user_id),
+                        amount: toNumber(row.amount),
+                        category: row.category ? String(row.category) : null,
+                        category_id: row.category_id ? String(row.category_id) : null,
+                        description: row.description ? String(row.description) : null,
+                        spent_at: String(row.spent_at),
+                        created_at: row.created_at ? String(row.created_at) : null,
+                        is_dating: row.is_dating === null ? null : Boolean(row.is_dating),
+                        is_for_partner: row.is_for_partner === null ? null : Boolean(row.is_for_partner),
+                    },
+                }))
+
+                const incomes = ((incomeRes.data ?? []) as IncomeDbRow[]).map((row) => ({
+                    id: String(row.id),
+                    kind: 'income' as const,
+                    title: row.category ? String(row.category) : 'Income',
+                    description: row.description ? String(row.description) : null,
+                    date: String(row.received_at),
+                    amount: toNumber(row.amount),
+                    created_at: row.created_at ? String(row.created_at) : null,
+                    source: {
+                        id: String(row.id),
+                        user_id: String(row.user_id),
+                        amount: toNumber(row.amount),
+                        category: row.category ? String(row.category) : null,
+                        category_id: row.category_id ? String(row.category_id) : null,
+                        description: row.description ? String(row.description) : null,
+                        received_at: String(row.received_at),
+                        created_at: row.created_at ? String(row.created_at) : null,
+                    },
+                }))
+
+                const savings = ((savingsRes.data ?? []) as SavingsTransactionDbRow[]).map((row) => ({
+                    id: String(row.id),
+                    kind: 'savings' as const,
+                    title: getRelatedAccountName(row.savings_accounts) || 'General Savings',
+                    description: row.description ? String(row.description) : null,
+                    date: String(row.saved_at),
+                    amount: row.type === 'withdrawal' ? -toNumber(row.amount) : toNumber(row.amount),
+                    created_at: row.created_at ? String(row.created_at) : null,
+                    source: {
+                        id: String(row.id),
+                        user_id: String(row.user_id),
+                        account_id: row.account_id ? String(row.account_id) : null,
+                        account_name: getRelatedAccountName(row.savings_accounts) || 'General Savings',
+                        amount: toNumber(row.amount),
+                        type: row.type === 'withdrawal' ? ('withdrawal' as const) : ('deposit' as const),
+                        source: normalizeSavingsSource(row.source),
+                        description: row.description ? String(row.description) : null,
+                        saved_at: String(row.saved_at),
+                        created_at: row.created_at ? String(row.created_at) : null,
+                    },
+                }))
+
+                const mergedRows = [...expenses, ...incomes, ...savings].sort((a, b) => {
+                    if (a.date !== b.date) return a.date < b.date ? 1 : -1
+                    return String(a.created_at ?? '') < String(b.created_at ?? '') ? 1 : -1
+                })
+                const nextRows = mergedRows.slice(0, cumulativeLimit)
+                const tableMayHaveMore =
+                    (expenseRes.data?.length ?? 0) >= cumulativeLimit ||
+                    (incomeRes.data?.length ?? 0) >= cumulativeLimit ||
+                    (savingsRes.data?.length ?? 0) >= cumulativeLimit
+                const pagination = getPaginationState({
+                    received: tableMayHaveMore ? HISTORY_PAGE_SIZE : nextRows.length - pageIndex * HISTORY_PAGE_SIZE,
+                    pageSize: HISTORY_PAGE_SIZE,
+                    page: pageIndex,
+                })
+
+                if (seq !== historyLoadSeqRef.current) return
+
+                setVisibleProfiles(loadedProfiles)
+                setHistoryRows(nextRows)
+                setHistoryPage(pageIndex)
+                setHistoryHasMore(tableMayHaveMore || pagination.hasMore)
+            } catch (error) {
+                setErrorMsg(error instanceof Error ? error.message : 'Unable to load history.')
+            } finally {
+                if (seq === historyLoadSeqRef.current) {
+                    setHistoryLoading(false)
+                    setHistoryLoadingMore(false)
+                }
+            }
+        },
+        [
+            dataScope,
+            filterMode,
+            getScopedUserIds,
+            historyFilter,
+            isDashboard,
+            loadVisibleProfiles,
+            selectedDay,
+            selectedMonth,
+            selectedYear,
+            supabase,
+            surface,
+            userId,
+            visibleProfiles,
+        ]
+    )
+
+    useEffect(() => {
+        if (!userId) return
+        setHistoryRows([])
+        setHistoryPage(0)
+        setHistoryHasMore(false)
+        loadHistoryPage(0)
+    }, [dataScope, filterMode, historyFilter, loadHistoryPage, selectedDay, selectedMonth, selectedYear, userId])
+
     useEffect(() => {
         const modalOpen = formOpen || Boolean(deleteTarget) || budgetOpen
         if (!modalOpen) return
@@ -871,6 +1193,27 @@ export default function FinanceTracker() {
             document.body.style.overflow = previousOverflow
         }
     }, [budgetOpen, deleteTarget, formOpen])
+
+    useEffect(() => {
+        if (isDashboard || !historyHasMore || historyLoading || historyLoadingMore) return
+
+        const rootEl = scrollRef.current
+        const targetEl = loadMoreRef.current
+        if (!rootEl || !targetEl) return
+
+        const observer = new IntersectionObserver(
+            (entries) => {
+                const entry = entries[0]
+                if (entry.isIntersecting && historyHasMore && !historyLoadingMore) {
+                    loadHistoryPage(historyPage + 1)
+                }
+            },
+            { root: rootEl, threshold: 0.2 }
+        )
+
+        observer.observe(targetEl)
+        return () => observer.disconnect()
+    }, [historyHasMore, historyLoading, historyLoadingMore, historyPage, isDashboard, loadHistoryPage])
 
     const ownExpenseRows = useMemo(
         () => (userId ? expenseRows.filter((row) => row.user_id === userId) : []),
@@ -962,9 +1305,25 @@ export default function FinanceTracker() {
     }, [expenseRows, incomeRows, savingsRows])
 
     const visibleTransactions = useMemo(() => {
-        if (historyFilter === 'all') return unifiedTransactions
-        return unifiedTransactions.filter((transaction) => transaction.kind === historyFilter)
-    }, [historyFilter, unifiedTransactions])
+        if (!isDashboard) return historyRows
+        const filtered = historyFilter === 'all'
+            ? unifiedTransactions
+            : unifiedTransactions.filter((transaction) => transaction.kind === historyFilter)
+        return filtered.slice(0, 5)
+    }, [historyFilter, historyRows, isDashboard, unifiedTransactions])
+
+    const breakdownRows = useMemo(() => {
+        if (isDashboard || filterMode === 'day') return []
+        const rows = [
+            ...expenseRows.map((row) => ({ date: row.spent_at, amount: -row.amount })),
+            ...incomeRows.map((row) => ({ date: row.received_at, amount: row.amount })),
+            ...savingsRows.map((row) => ({
+                date: row.saved_at,
+                amount: row.type === 'withdrawal' ? -row.amount : row.amount,
+            })),
+        ]
+        return buildFinanceBreakdown(rows, filterMode)
+    }, [expenseRows, filterMode, incomeRows, isDashboard, savingsRows])
 
     const budgetComparisons = useMemo(() => {
         const spentByCategory = new Map<string, number>()
@@ -1296,6 +1655,7 @@ export default function FinanceTracker() {
             setFormOpen(false)
             setEditingTarget(null)
             await loadFinanceData({ force: true })
+            await loadHistoryPage(0)
         } catch (error) {
             setErrorMsg(error instanceof Error ? error.message : 'Unable to save transaction.')
         } finally {
@@ -1322,6 +1682,7 @@ export default function FinanceTracker() {
 
             setDeleteTarget(null)
             await loadFinanceData({ force: true })
+            await loadHistoryPage(0)
         } catch (error) {
             setErrorMsg(error instanceof Error ? error.message : 'Unable to delete transaction.')
         } finally {
@@ -1414,6 +1775,28 @@ export default function FinanceTracker() {
         }
     }
 
+    const activeDateRange = buildFinanceDateRange({
+        mode: isDashboard ? 'month' : filterMode,
+        year: selectedYear,
+        month: selectedMonth,
+        day: selectedDay,
+    })
+    const selectableYears = Array.from(
+        new Set([now.getFullYear(), ...availableMonths.map((item) => item.year)])
+    ).sort((a, b) => b - a)
+    const selectableMonths =
+        selectedYear === 'all'
+            ? Array.from({ length: 12 }, (_, index) => index + 1)
+            : Array.from(
+                new Set([
+                    now.getMonth() + 1,
+                    ...availableMonths
+                        .filter((item) => item.year === Number(selectedYear))
+                        .map((item) => item.month),
+                ])
+            ).sort((a, b) => a - b)
+    const selectableDays = availableDays.length > 0 ? availableDays : [now.getDate()]
+
     if (loading) {
         return (
             <AppShell title="Finance" subtitle="Loading...">
@@ -1444,9 +1827,11 @@ export default function FinanceTracker() {
                     <section className="space-y-3">
                         <div className="flex items-end justify-between gap-3">
                             <div>
-                                <p className="text-xs font-black uppercase tracking-widest text-rose-400">Personal finance</p>
+                                <p className="text-xs font-black uppercase tracking-widest text-rose-400">
+                                    {isDashboard ? 'Dashboard overview' : 'Finance tracker'}
+                                </p>
                                 <h1 className="text-3xl font-black tracking-tight text-stone-800">
-                                    {monthLabel(selectedYear, selectedMonth)}
+                                    {isDashboard ? monthLabel(selectedYear, selectedMonth) : activeDateRange.label}
                                 </h1>
                             </div>
                             <div className="rounded-full bg-white px-3 py-2 text-xs font-black text-stone-400 shadow-sm">
@@ -1454,24 +1839,86 @@ export default function FinanceTracker() {
                             </div>
                         </div>
 
-                        <div className="grid grid-cols-2 gap-2 rounded-[2rem] border border-stone-100 bg-white p-3 shadow-sm">
-                            <SmallSelect label="Year" value={selectedYear} onChange={setSelectedYear}>
-                                {Array.from(new Set(availableMonths.map((item) => item.year))).map((year) => (
-                                    <option key={year} value={String(year)}>
-                                        {year}
-                                    </option>
-                                ))}
-                            </SmallSelect>
-                            <SmallSelect label="Month" value={selectedMonth} onChange={setSelectedMonth}>
-                                {availableMonths
-                                    .filter((item) => item.year === Number(selectedYear))
-                                    .map((item) => (
-                                        <option key={`${item.year}-${item.month}`} value={String(item.month)}>
-                                            {MONTHS[item.month - 1]}
-                                        </option>
+                        {isDashboard ? (
+                            <div className="rounded-[2rem] border border-stone-100 bg-white p-4 text-sm font-bold text-stone-500 shadow-sm">
+                                Quick personal view for this month. Use Finance Tracker for day, year, partner, and combined filters.
+                            </div>
+                        ) : (
+                            <div className="space-y-3 rounded-[2rem] border border-stone-100 bg-white p-3 shadow-sm">
+                                <div className="grid grid-cols-3 gap-2">
+                                    {(['personal', 'partner', 'combined'] as const).map((scope) => (
+                                        <button
+                                            key={scope}
+                                            type="button"
+                                            onClick={() => setDataScope(scope)}
+                                            className={`rounded-2xl px-3 py-2 text-xs font-black capitalize transition active:scale-95 ${dataScope === scope
+                                                ? 'bg-stone-800 text-white'
+                                                : 'bg-stone-50 text-stone-500'
+                                                }`}
+                                        >
+                                            {scope}
+                                        </button>
                                     ))}
-                            </SmallSelect>
-                        </div>
+                                </div>
+
+                                <div className="grid grid-cols-4 gap-2">
+                                    {(['day', 'month', 'year', 'all'] as const).map((mode) => (
+                                        <button
+                                            key={mode}
+                                            type="button"
+                                            onClick={() => {
+                                                setFilterMode(mode)
+                                                if (mode === 'all') {
+                                                    setSelectedYear('all')
+                                                    setSelectedMonth('all')
+                                                    setSelectedDay('all')
+                                                } else if (selectedYear === 'all') {
+                                                    setSelectedYear(String(now.getFullYear()))
+                                                    setSelectedMonth(String(now.getMonth() + 1))
+                                                    setSelectedDay(String(now.getDate()))
+                                                }
+                                            }}
+                                            className={`rounded-2xl px-3 py-2 text-xs font-black capitalize transition active:scale-95 ${filterMode === mode
+                                                ? 'bg-rose-400 text-white'
+                                                : 'bg-rose-50 text-rose-500'
+                                                }`}
+                                        >
+                                            {mode}
+                                        </button>
+                                    ))}
+                                </div>
+
+                                {filterMode !== 'all' ? (
+                                    <div className={`grid gap-2 ${filterMode === 'day' ? 'grid-cols-3' : filterMode === 'month' ? 'grid-cols-2' : 'grid-cols-1'}`}>
+                                        <SmallSelect label="Year" value={selectedYear === 'all' ? String(now.getFullYear()) : selectedYear} onChange={setSelectedYear}>
+                                            {selectableYears.map((year) => (
+                                                <option key={year} value={String(year)}>
+                                                    {year}
+                                                </option>
+                                            ))}
+                                        </SmallSelect>
+                                        {filterMode === 'day' || filterMode === 'month' ? (
+                                            <SmallSelect label="Month" value={selectedMonth === 'all' ? String(now.getMonth() + 1) : selectedMonth} onChange={setSelectedMonth}>
+                                                {selectableMonths.map((month) => (
+                                                    <option key={month} value={String(month)}>
+                                                        {MONTHS[month - 1]}
+                                                    </option>
+                                                ))}
+                                            </SmallSelect>
+                                        ) : null}
+                                        {filterMode === 'day' ? (
+                                            <SmallSelect label="Day" value={selectedDay === 'all' ? String(now.getDate()) : selectedDay} onChange={setSelectedDay}>
+                                                {selectableDays.map((day) => (
+                                                    <option key={day} value={String(day)}>
+                                                        {pad2(day)}
+                                                    </option>
+                                                ))}
+                                            </SmallSelect>
+                                        ) : null}
+                                    </div>
+                                ) : null}
+                            </div>
+                        )}
                     </section>
 
                     {errorMsg ? (
@@ -1519,7 +1966,7 @@ export default function FinanceTracker() {
                         />
                     </section>
 
-                    {hasPartnerVisibility ? (
+                    {!isDashboard && hasPartnerVisibility ? (
                         <section className="space-y-3 rounded-[2rem] bg-white p-4 shadow-sm">
                             <div>
                                 <h2 className="text-lg font-black text-stone-800">Shared Expense View</h2>
@@ -1558,6 +2005,36 @@ export default function FinanceTracker() {
                         <TypeButton active label="Savings" tone="sky" onClick={() => openCreate('savings')} />
                     </section>
 
+                    {!isDashboard && filterMode !== 'day' ? (
+                        <section className="space-y-3 rounded-[2rem] bg-white p-4 shadow-sm">
+                            <div>
+                                <h2 className="text-lg font-black text-stone-800">
+                                    {filterMode === 'month' ? 'Daily Breakdown' : filterMode === 'year' ? 'Monthly Breakdown' : 'Yearly Breakdown'}
+                                </h2>
+                                <p className="text-xs font-bold text-stone-400">
+                                    Net movement for the selected {dataScope} scope.
+                                </p>
+                            </div>
+                            {breakdownRows.length === 0 ? (
+                                <div className="rounded-3xl bg-stone-50 p-4 text-sm font-bold text-stone-400">
+                                    No breakdown data for this filter.
+                                </div>
+                            ) : (
+                                <div className="grid grid-cols-1 gap-2">
+                                    {breakdownRows.map((row) => (
+                                        <div key={row.key} className="flex items-center justify-between gap-3 rounded-3xl bg-stone-50 p-4">
+                                            <span className="font-black text-stone-700">{row.label}</span>
+                                            <span className={`shrink-0 font-black ${row.amount >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                                                {signedMoney(row.amount)}
+                                            </span>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </section>
+                    ) : null}
+
+                    {isDashboard || dataScope === 'personal' ? (
                     <section className="space-y-3 rounded-[2rem] bg-white p-4 shadow-sm">
                         <div className="flex items-center justify-between gap-3">
                             <div>
@@ -1618,41 +2095,61 @@ export default function FinanceTracker() {
                             </div>
                         )}
                     </section>
+                    ) : (
+                        <section className="rounded-[2rem] bg-white p-4 text-sm font-bold text-stone-400 shadow-sm">
+                            Budget limits are personal only and are hidden for partner / combined history views.
+                        </section>
+                    )}
 
                     <section className="space-y-3">
                         <div className="flex items-center justify-between gap-3 px-1">
                             <div>
-                                <h2 className="text-lg font-black text-stone-800">Shared Monthly History</h2>
-                                <p className="text-xs font-bold text-stone-400">Income and savings are yours; expenses can include partner records.</p>
+                                <h2 className="text-lg font-black text-stone-800">
+                                    {isDashboard ? 'Recent Transactions' : `${dataScope === 'personal' ? 'Personal' : dataScope === 'partner' ? 'Partner' : 'Combined'} History`}
+                                </h2>
+                                <p className="text-xs font-bold text-stone-400">
+                                    {isDashboard
+                                        ? 'Latest 5 personal records only.'
+                                        : 'Loaded 10 records at a time for the selected filter.'}
+                                </p>
                             </div>
                             <span className="rounded-full bg-white px-3 py-1 text-xs font-black text-stone-400 shadow-sm">
-                                {visibleTransactions.length} records
+                                {visibleTransactions.length}{!isDashboard && historyHasMore ? '+' : ''} records
                             </span>
                         </div>
 
-                        <div className="grid grid-cols-4 gap-2">
-                            {(['all', 'expense', 'income', 'savings'] as const).map((kind) => (
-                                <button
-                                    key={kind}
-                                    type="button"
-                                    onClick={() => setHistoryFilter(kind)}
-                                    className={`rounded-2xl px-3 py-2 text-xs font-black capitalize shadow-sm transition active:scale-95 ${historyFilter === kind
-                                        ? 'bg-stone-800 text-white'
-                                        : 'bg-white text-stone-500'
-                                        }`}
-                                >
-                                    {kind}
-                                </button>
-                            ))}
-                        </div>
+                        {!isDashboard ? (
+                            <div className="grid grid-cols-4 gap-2">
+                                {(['all', 'expense', 'income', 'savings'] as const).map((kind) => (
+                                    <button
+                                        key={kind}
+                                        type="button"
+                                        onClick={() => setHistoryFilter(kind)}
+                                        className={`rounded-2xl px-3 py-2 text-xs font-black capitalize shadow-sm transition active:scale-95 ${historyFilter === kind
+                                            ? 'bg-stone-800 text-white'
+                                            : 'bg-white text-stone-500'
+                                            }`}
+                                    >
+                                        {kind}
+                                    </button>
+                                ))}
+                            </div>
+                        ) : null}
 
-                        {visibleTransactions.length === 0 ? (
+                        {historyLoading && !isDashboard ? (
+                            <div className="rounded-[2rem] bg-white p-8 text-center text-sm font-black text-stone-400 shadow-sm">
+                                Loading records...
+                            </div>
+                        ) : visibleTransactions.length === 0 ? (
                             <div className="rounded-[2rem] bg-white p-8 text-center shadow-sm">
                                 <p className="text-4xl">💤</p>
                                 <p className="mt-3 font-black text-stone-600">No records for this view.</p>
                             </div>
                         ) : (
-                            <div className="space-y-3">
+                            <div
+                                ref={isDashboard ? undefined : scrollRef}
+                                className={`space-y-3 ${isDashboard ? '' : 'max-h-[70vh] overflow-y-auto overscroll-contain pr-1'}`}
+                            >
                                 {visibleTransactions.map((transaction) => {
                                     const isPositive = transaction.amount >= 0
                                     const isOwnRecord = transaction.source.user_id === userId
@@ -1740,6 +2237,17 @@ export default function FinanceTracker() {
                                         </div>
                                     )
                                 })}
+                                {!isDashboard ? (
+                                    <div ref={loadMoreRef} className="flex h-12 items-center justify-center">
+                                        {historyLoadingMore ? (
+                                            <span className="text-xs font-bold text-stone-400">Loading more...</span>
+                                        ) : historyHasMore ? (
+                                            <span className="text-xs font-bold text-stone-300">Scroll for more</span>
+                                        ) : (
+                                            <span className="text-xs font-bold text-stone-300">No more records</span>
+                                        )}
+                                    </div>
+                                ) : null}
                             </div>
                         )}
                     </section>

@@ -1,5 +1,5 @@
 import FinanceTracker from './components/FinanceTracker'
 
 export default function DashboardPage() {
-    return <FinanceTracker />
+    return <FinanceTracker surface="dashboard" />
 }

@@ -1,5 +1,8 @@
 export type SavingsSource = 'monthly_income' | 'existing_money' | 'other'
 export type SavingsAction = 'deposit' | 'withdrawal'
+export type FinanceFilterMode = 'day' | 'month' | 'year' | 'all'
+export type FinanceScope = 'personal' | 'partner' | 'combined'
+export type FinanceTransactionType = 'all' | 'expense' | 'income' | 'savings'
 
 export type AmountRow = {
     user_id: string | null
@@ -32,6 +35,11 @@ export type FinanceTotals = {
 }
 
 export const UNASSIGNED_SAVINGS_ACCOUNT_KEY = '__unassigned__'
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+function pad2(value: number | string) {
+    return String(Number(value)).padStart(2, '0')
+}
 
 function amount(value: number) {
     return Number.isFinite(value) ? value : 0
@@ -119,4 +127,129 @@ export function getAvailableBalanceForWithdrawal(
         accountId: options.accountId,
         excludeTransactionId: options.editingTransactionId,
     })
+}
+
+export function buildFinanceDateRange(input: {
+    mode: FinanceFilterMode
+    year: string
+    month: string
+    day: string
+}) {
+    if (input.mode === 'all') {
+        return { startISO: null, endISO: null, label: 'All years' }
+    }
+
+    const year = Number(input.year)
+    if (!Number.isFinite(year)) {
+        return { startISO: null, endISO: null, label: 'All years' }
+    }
+
+    if (input.mode === 'year') {
+        return {
+            startISO: `${year}-01-01`,
+            endISO: `${year + 1}-01-01`,
+            label: String(year),
+        }
+    }
+
+    const month = Number(input.month)
+    if (!Number.isFinite(month) || month < 1 || month > 12) {
+        return {
+            startISO: `${year}-01-01`,
+            endISO: `${year + 1}-01-01`,
+            label: String(year),
+        }
+    }
+
+    if (input.mode === 'month') {
+        const nextMonth = month === 12 ? 1 : month + 1
+        const nextYear = month === 12 ? year + 1 : year
+        return {
+            startISO: `${year}-${pad2(month)}-01`,
+            endISO: `${nextYear}-${pad2(nextMonth)}-01`,
+            label: `${MONTHS[month - 1]} ${year}`,
+        }
+    }
+
+    const day = Number(input.day)
+    const safeDay = Number.isFinite(day) && day >= 1 && day <= 31 ? day : 1
+    const start = new Date(Date.UTC(year, month - 1, safeDay))
+    const end = new Date(Date.UTC(year, month - 1, safeDay + 1))
+
+    return {
+        startISO: start.toISOString().slice(0, 10),
+        endISO: end.toISOString().slice(0, 10),
+        label: `${pad2(safeDay)} ${MONTHS[month - 1]} ${year}`,
+    }
+}
+
+export function createFinanceCacheKey(input: {
+    userId: string
+    visibleUserIds: string[]
+    surface: 'dashboard' | 'tracker'
+    scope: FinanceScope
+    mode: FinanceFilterMode
+    year: string
+    month: string
+    day: string
+    transactionType: FinanceTransactionType
+    page?: number
+}) {
+    const visibleScope = Array.from(new Set([input.userId, ...input.visibleUserIds])).sort().join(',')
+    const normalizedMonth = input.month === 'all' ? 'all' : pad2(input.month)
+    const normalizedDay = input.day === 'all' ? 'all' : pad2(input.day)
+    const dateKey =
+        input.mode === 'day'
+            ? `${input.year}-${normalizedMonth}-${normalizedDay}`
+            : input.mode === 'month'
+                ? `${input.year}-${normalizedMonth}`
+                : input.mode === 'year'
+                    ? input.year
+                    : 'all'
+    const pageKey = typeof input.page === 'number' ? `:p${input.page}` : ''
+
+    return `finance:v5:${input.surface}:${input.userId}:${visibleScope}:${input.scope}:${input.transactionType}:${input.mode}:${dateKey}${pageKey}`
+}
+
+export function getPaginationState(input: { received: number; pageSize: number; page: number }) {
+    const hasMore = input.received >= input.pageSize
+    return {
+        page: input.page,
+        hasMore,
+        nextPage: input.page + 1,
+    }
+}
+
+export function buildFinanceBreakdown(rows: Array<{ date: string; amount: number }>, mode: FinanceFilterMode) {
+    const grouped = new Map<string, { label: string; amount: number }>()
+
+    rows.forEach((row) => {
+        const date = String(row.date).slice(0, 10)
+        const year = date.slice(0, 4)
+        const month = Number(date.slice(5, 7))
+        const day = date.slice(8, 10)
+        if (!year || !Number.isFinite(month) || month < 1 || month > 12) return
+
+        const key =
+            mode === 'all'
+                ? year
+                : mode === 'year'
+                    ? `${year}-${pad2(month)}`
+                    : date
+        const label =
+            mode === 'all'
+                ? year
+                : mode === 'year'
+                    ? `${MONTHS[month - 1]} ${year}`
+                    : `${day} ${MONTHS[month - 1]}`
+        const current = grouped.get(key)
+        grouped.set(key, {
+            label,
+            amount: (current?.amount ?? 0) + amount(row.amount),
+        })
+    })
+
+    return Array.from(grouped.entries())
+        .map(([key, value]) => ({ key, ...value }))
+        .sort((a, b) => a.key.localeCompare(b.key))
 }

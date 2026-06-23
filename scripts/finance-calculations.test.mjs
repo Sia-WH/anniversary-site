@@ -44,6 +44,42 @@ test('personal totals exclude partner expenses and deduct only monthly-income sa
     assert.equal(totals.monthlySavings, 1300)
 })
 
+test('shared expense totals keep current user and partner totals separate', async () => {
+    const { calculateSharedExpenseTotals } = await loadFinanceCalculations()
+
+    const totals = calculateSharedExpenseTotals({
+        userId: 'user-a',
+        partnerUserIds: ['user-b'],
+        expenses: [
+            { user_id: 'user-a', amount: 120 },
+            { user_id: 'user-b', amount: 80 },
+            { user_id: 'user-c', amount: 999 },
+            { user_id: null, amount: 500 },
+        ],
+    })
+
+    assert.deepEqual(totals, {
+        myExpenses: 120,
+        partnerExpenses: 80,
+    })
+})
+
+test('shared expense totals show zero when partner has no expenses', async () => {
+    const { calculateSharedExpenseTotals } = await loadFinanceCalculations()
+
+    assert.deepEqual(
+        calculateSharedExpenseTotals({
+            userId: 'user-a',
+            partnerUserIds: ['user-b'],
+            expenses: [{ user_id: 'user-a', amount: 120 }],
+        }),
+        {
+            myExpenses: 120,
+            partnerExpenses: 0,
+        }
+    )
+})
+
 test('savings balance is deposits minus withdrawals, grouped by account and never displayed below zero', async () => {
     const { calculateSavingsBalance, calculateSavingsAccountBalances } = await loadFinanceCalculations()
 

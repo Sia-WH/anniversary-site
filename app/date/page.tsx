@@ -71,6 +71,19 @@ function Pill({ emoji, label, value }: { emoji: string; label: string; value: st
     )
 }
 
+function LoadingRows({ count = 3 }: { count?: number }) {
+    return (
+        <div className="space-y-3 py-3">
+            {Array.from({ length: count }).map((_, index) => (
+                <div key={index} className="animate-pulse rounded-3xl bg-white/70 border border-white p-4">
+                    <div className="h-4 w-2/3 rounded-full bg-stone-100" />
+                    <div className="mt-3 h-3 w-1/2 rounded-full bg-stone-100" />
+                </div>
+            ))}
+        </div>
+    )
+}
+
 export default function DatePage() {
     const supabase = useMemo(() => {
         const url = process.env.NEXT_PUBLIC_SUPABASE_URL
@@ -121,6 +134,7 @@ export default function DatePage() {
     const [rows, setRows] = useState<ExpenseRow[]>([])
     const scrollRef = useRef<HTMLDivElement | null>(null)
     const loadMoreRef = useRef<HTMLDivElement | null>(null)
+    const loadSeqRef = useRef(0)
 
     const apiFetch = useCallback(async (path: string, token: string) => {
         const res = await fetch(path, { headers: { Authorization: `Bearer ${token}` } })
@@ -234,22 +248,25 @@ export default function DatePage() {
         if (loadingMore) return
         setLoadingMore(true)
 
-        const monthParam = selectedMonth === 'all' ? 'all' : pad2(Number(selectedMonth))
-        const dayParam = selectedDay === 'all' ? 'all' : pad2(Number(selectedDay))
+        try {
+            const monthParam = selectedMonth === 'all' ? 'all' : pad2(Number(selectedMonth))
+            const dayParam = selectedDay === 'all' ? 'all' : pad2(Number(selectedDay))
 
-        const json = await apiFetch(
-            `/api/expenses/summary?action=transactions&scope=combined&onlyDating=1&year=${selectedYear}&month=${monthParam}&day=${dayParam}&page=${pageIndex}&limit=${PAGE_SIZE}`,
-            token
-        )
+            const json = await apiFetch(
+                `/api/expenses/summary?action=transactions&scope=combined&onlyDating=1&year=${selectedYear}&month=${monthParam}&day=${dayParam}&page=${pageIndex}&limit=${PAGE_SIZE}`,
+                token
+            )
 
-        const list: ExpenseRow[] = Array.isArray(json?.rows) ? json.rows : []
+            const list: ExpenseRow[] = Array.isArray(json?.rows) ? json.rows : []
 
-        if (mode === 'replace') setRows(list)
-        else setRows((prev) => [...prev, ...list])
+            if (mode === 'replace') setRows(list)
+            else setRows((prev) => [...prev, ...list])
 
-        setPage(pageIndex)
-        setHasMore(Boolean(json?.hasMore))
-        setLoadingMore(false)
+            setPage(pageIndex)
+            setHasMore(Boolean(json?.hasMore))
+        } finally {
+            setLoadingMore(false)
+        }
     }, [apiFetch, loadingMore, selectedDay, selectedMonth, selectedYear])
 
     // Main load + refresh on selection changes
@@ -258,6 +275,7 @@ export default function DatePage() {
             try {
                 setLoading(true)
                 setErrorMsg(null)
+                const seq = ++loadSeqRef.current
 
                 if (!supabase) {
                     setErrorMsg('Missing Supabase env vars.')
@@ -279,14 +297,30 @@ export default function DatePage() {
                 setMyUserId(userRes.user.id)
 
                 const okMonths = await fetchAvailableMonths(token)
-                if (okMonths) await fetchAvailableDays(token)
+                if (!okMonths) {
+                    setLoading(false)
+                    return
+                }
+
+                const okDays = await fetchAvailableDays(token)
+                if (!okDays) {
+                    setLoading(false)
+                    return
+                }
+
+                if (seq !== loadSeqRef.current) {
+                    setLoading(false)
+                    return
+                }
 
                 setHasMore(true)
                 setPage(0)
 
-                await fetchSummary(token)
-                await fetchTotalCount(token)
-                await fetchTransactionsPage(token, 0, 'replace')
+                await Promise.all([
+                    fetchSummary(token),
+                    fetchTotalCount(token),
+                    fetchTransactionsPage(token, 0, 'replace'),
+                ])
 
                 setLoading(false)
             } catch (error) {
@@ -298,12 +332,6 @@ export default function DatePage() {
         load()
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [selectedYear, selectedMonth, selectedDay, supabase])
-
-    useEffect(() => {
-        if (!authToken) return
-        fetchTotalCount(authToken)
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [authToken, selectedYear, selectedMonth, selectedDay])
 
     // Infinite scroll observer (sentinel MUST be inside scroll div)
     useEffect(() => {
@@ -361,7 +389,7 @@ export default function DatePage() {
                         )}
 
                         {/* Date selectors */}
-                        <div className="mt-4 grid grid-cols-3 gap-2">
+                        <div className="mt-4 grid grid-cols-1 gap-2 min-[420px]:grid-cols-3">
                             <CuteSelect
                                 label="Year"
                                 value={selectedYear}
@@ -421,7 +449,7 @@ export default function DatePage() {
                         </div>
 
                         {loading ? (
-                            <div className="py-10 text-center text-stone-500 font-bold">Loading... ✨</div>
+                            <LoadingRows count={2} />
                         ) : (
                             <div className="mt-4 grid grid-cols-1 gap-3">
                                 <Pill emoji="🧍" label="My Total" value={`RM ${Number(meTotal || 0).toFixed(2)}`} />
@@ -443,7 +471,7 @@ export default function DatePage() {
 
                         <div ref={scrollRef} className="h-[65vh] overflow-y-auto overscroll-contain px-5 pb-5">
                             {loading ? (
-                                <div className="py-14 text-center text-stone-500 font-bold">Loading... ✨</div>
+                                <LoadingRows count={4} />
                             ) : rows.length === 0 ? (
                                 <div className="py-14 text-center">
                                     <div className="text-5xl mb-3">🧾</div>

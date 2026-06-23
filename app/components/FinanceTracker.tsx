@@ -3,6 +3,7 @@
 import {
     buildFinanceDateRange,
     calculateFinanceTotals,
+    calculateSharedExpenseTotals,
     calculateSavingsAccountBalances,
     calculateSavingsBalance,
     createFinanceCacheKey,
@@ -126,6 +127,7 @@ type FinanceSnapshot = {
     savingsAccounts: SavingsAccountRow[]
     expenseLimits: ExpenseLimitRow[]
     expenseRows: ExpenseRow[]
+    sharedExpenseRows: ExpenseRow[]
     incomeRows: IncomeRow[]
     savingsRows: SavingsTransactionRow[]
     allSavingsRows: SavingsTransactionRow[]
@@ -517,6 +519,7 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
     const [savingsAccounts, setSavingsAccounts] = useState<SavingsAccountRow[]>([])
     const [expenseLimits, setExpenseLimits] = useState<ExpenseLimitRow[]>([])
     const [expenseRows, setExpenseRows] = useState<ExpenseRow[]>([])
+    const [sharedExpenseRows, setSharedExpenseRows] = useState<ExpenseRow[]>([])
     const [incomeRows, setIncomeRows] = useState<IncomeRow[]>([])
     const [savingsRows, setSavingsRows] = useState<SavingsTransactionRow[]>([])
     const [allSavingsRows, setAllSavingsRows] = useState<SavingsTransactionRow[]>([])
@@ -569,6 +572,7 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
         setSavingsAccounts(snapshot.savingsAccounts)
         setExpenseLimits(snapshot.expenseLimits)
         setExpenseRows(snapshot.expenseRows)
+        setSharedExpenseRows(snapshot.sharedExpenseRows ?? snapshot.expenseRows)
         setIncomeRows(snapshot.incomeRows)
         setSavingsRows(snapshot.savingsRows)
         setAllSavingsRows(snapshot.allSavingsRows)
@@ -682,6 +686,7 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                     savingsAccountsRes,
                     expenseLimitsRes,
                     expenseRowsRes,
+                    sharedExpenseRowsRes,
                     incomeRowsRes,
                     savingsRowsRes,
                     savingsAllRowsRes,
@@ -737,6 +742,17 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                             .order('spent_at', { ascending: false })
                             .order('created_at', { ascending: false })
                         : emptyRows,
+                    !isDashboard && visibleUserIds.length > 0
+                        ? applyRange(
+                            supabase
+                                .from('expenses')
+                                .select('id, user_id, amount, category, category_id, description, spent_at, created_at, is_dating, is_for_partner')
+                                .in('user_id', visibleUserIds),
+                            'spent_at'
+                        )
+                            .order('spent_at', { ascending: false })
+                            .order('created_at', { ascending: false })
+                        : emptyRows,
                     activeScope === 'personal'
                         ? applyRange(
                             supabase
@@ -774,6 +790,7 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                     savingsAccountsRes.error,
                     expenseLimitsRes.error,
                     expenseRowsRes.error,
+                    sharedExpenseRowsRes.error,
                     incomeRowsRes.error,
                     savingsRowsRes.error,
                     savingsAllRowsRes.error,
@@ -804,6 +821,7 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                 const savingsAccountRows = (savingsAccountsRes.data ?? []) as SavingsAccountDbRow[]
                 const expenseLimitRows = (expenseLimitsRes.data ?? []) as ExpenseLimitDbRow[]
                 const monthlyExpenseRows = (expenseRowsRes.data ?? []) as ExpenseDbRow[]
+                const sharedExpenseDbRows = (sharedExpenseRowsRes.data ?? []) as ExpenseDbRow[]
                 const monthlyIncomeRows = (incomeRowsRes.data ?? []) as IncomeDbRow[]
                 const monthlySavingsRows = (savingsRowsRes.data ?? []) as SavingsTransactionDbRow[]
                 const allSavingsTransactionRows = (savingsAllRowsRes.data ?? []) as SavingsTransactionDbRow[]
@@ -869,6 +887,18 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                         is_active: Boolean(row.is_active),
                     })),
                     expenseRows: monthlyExpenseRows.map((row) => ({
+                        id: String(row.id),
+                        user_id: String(row.user_id),
+                        amount: toNumber(row.amount),
+                        category: row.category ? String(row.category) : null,
+                        category_id: row.category_id ? String(row.category_id) : null,
+                        description: row.description ? String(row.description) : null,
+                        spent_at: String(row.spent_at),
+                        created_at: row.created_at ? String(row.created_at) : null,
+                        is_dating: row.is_dating === null ? null : Boolean(row.is_dating),
+                        is_for_partner: row.is_for_partner === null ? null : Boolean(row.is_for_partner),
+                    })),
+                    sharedExpenseRows: sharedExpenseDbRows.map((row) => ({
                         id: String(row.id),
                         user_id: String(row.user_id),
                         amount: toNumber(row.amount),
@@ -1219,27 +1249,29 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
         [expenseRows, userId]
     )
 
-    const partnerExpenseRows = useMemo(
-        () => (userId ? expenseRows.filter((row) => row.user_id !== userId) : []),
-        [expenseRows, userId]
+    const partnerUserIds = useMemo(
+        () =>
+            visibleProfiles
+                .filter((profile) => profile.relation === 'partner' && profile.user_id !== userId)
+                .map((profile) => profile.user_id),
+        [userId, visibleProfiles]
     )
 
     const expenseScopeTotals = useMemo(() => {
-        const myExpenses = ownExpenseRows.reduce((sum, row) => sum + row.amount, 0)
-        const partnerExpenses = partnerExpenseRows.reduce((sum, row) => sum + row.amount, 0)
-        return {
-            myExpenses,
-            partnerExpenses,
-            combinedExpenses: myExpenses + partnerExpenses,
-        }
-    }, [ownExpenseRows, partnerExpenseRows])
+        if (!userId) return { myExpenses: 0, partnerExpenses: 0 }
+        return calculateSharedExpenseTotals({
+            userId,
+            partnerUserIds,
+            expenses: sharedExpenseRows,
+        })
+    }, [partnerUserIds, sharedExpenseRows, userId])
 
     const partnerLabel = useMemo(() => {
         const partner = visibleProfiles.find((profile) => profile.relation === 'partner')
         return partner?.display_name || 'Partner'
     }, [visibleProfiles])
 
-    const hasPartnerVisibility = visibleProfiles.some((profile) => profile.relation === 'partner')
+    const hasPartnerVisibility = partnerUserIds.length > 0
 
     const totals = useMemo(() => {
         if (!userId) {
@@ -1960,25 +1992,19 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                                     Visible partner expenses are separate from your personal cash flow.
                                 </p>
                             </div>
-                            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                                 <div className="rounded-3xl bg-stone-50 p-3">
-                                    <p className="text-[10px] font-black uppercase tracking-widest text-stone-400">Me</p>
+                                    <p className="text-[10px] font-black uppercase tracking-widest text-stone-400">My Total Expense</p>
                                     <p className="mt-1 text-sm font-black text-stone-800">
                                         RM {money(expenseScopeTotals.myExpenses)}
                                     </p>
                                 </div>
                                 <div className="rounded-3xl bg-sky-50 p-3">
                                     <p className="truncate text-[10px] font-black uppercase tracking-widest text-sky-500">
-                                        {partnerLabel}
+                                        {partnerLabel} Total Expense
                                     </p>
                                     <p className="mt-1 text-sm font-black text-sky-800">
                                         RM {money(expenseScopeTotals.partnerExpenses)}
-                                    </p>
-                                </div>
-                                <div className="rounded-3xl bg-rose-50 p-3">
-                                    <p className="text-[10px] font-black uppercase tracking-widest text-rose-500">Combined</p>
-                                    <p className="mt-1 text-sm font-black text-rose-800">
-                                        RM {money(expenseScopeTotals.combinedExpenses)}
                                     </p>
                                 </div>
                             </div>

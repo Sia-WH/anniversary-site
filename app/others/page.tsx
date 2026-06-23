@@ -13,6 +13,8 @@ type ExpenseRow = {
     description?: string | null
     spent_at: string // YYYY-MM-DD
     created_at?: string | null
+    owner_name?: string | null
+    owner_relation?: 'me' | 'partner'
 }
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
@@ -56,6 +58,19 @@ function CuteSelect(props: {
                 {props.children}
             </select>
         </label>
+    )
+}
+
+function LoadingRows({ count = 3 }: { count?: number }) {
+    return (
+        <div className="space-y-3 py-3">
+            {Array.from({ length: count }).map((_, index) => (
+                <div key={index} className="animate-pulse rounded-3xl bg-white/70 border border-white p-4">
+                    <div className="h-4 w-2/3 rounded-full bg-stone-100" />
+                    <div className="mt-3 h-3 w-1/2 rounded-full bg-stone-100" />
+                </div>
+            ))}
+        </div>
     )
 }
 
@@ -281,8 +296,10 @@ export default function OthersPage() {
                 // reset paging + load
                 setHasMore(true)
                 setPage(0)
-                await fetchSummary(token)
-                await fetchTransactionsPage(token, 0, 'replace', userRes.user.id)
+                await Promise.all([
+                    fetchSummary(token),
+                    fetchTransactionsPage(token, 0, 'replace', userRes.user.id),
+                ])
 
                 setLoading(false)
             } catch (error) {
@@ -320,19 +337,23 @@ export default function OthersPage() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [userId, hasMore, loadingMore, page, selectedYear, selectedMonth, selectedDay])
 
-    const topCats = [...categories]
-        .sort((a, b) => (Number(b.amount) || 0) - (Number(a.amount) || 0))
-        .slice(0, 6)
+    const topCats = useMemo(
+        () =>
+            [...categories]
+                .sort((a, b) => (Number(b.amount) || 0) - (Number(a.amount) || 0))
+                .slice(0, 6),
+        [categories]
+    )
 
     return (
-        <AppShell title="His/Her Spendings" subtitle="">
+        <AppShell title="Partner Expenses" subtitle="">
             <div className="px-4 pb-28">
                 <div className="max-w-2xl mx-auto space-y-4">
                     {/* Summary Card */}
                     <div className="rounded-[28px] bg-white/80 backdrop-blur border border-white shadow-[0_14px_45px_rgba(0,0,0,0.10)] p-5">
                         <div className="flex items-start justify-between gap-3">
                             <div>
-                                <div className="text-xs font-black uppercase tracking-widest text-stone-400">Partner total spending</div>
+                                <div className="text-xs font-black uppercase tracking-widest text-stone-400">Partner total expense</div>
                                 <div className="mt-2 text-3xl font-black text-stone-800 leading-none">RM {total.toFixed(2)}</div>
                                 <div className="mt-2 text-xs font-bold text-stone-500">{monthLabel}</div>
                             </div>
@@ -350,7 +371,7 @@ export default function OthersPage() {
                         )}
 
                         {/* Date selectors */}
-                        <div className="mt-4 grid grid-cols-3 gap-2">
+                        <div className="mt-4 grid grid-cols-1 gap-2 min-[420px]:grid-cols-3">
                             <CuteSelect
                                 label="Year"
                                 value={selectedYear}
@@ -412,7 +433,7 @@ export default function OthersPage() {
                         </div>
 
                         {loading ? (
-                            <div className="py-10 text-center text-stone-500 font-bold">Loading... ✨</div>
+                            <LoadingRows />
                         ) : categories.length === 0 ? (
                             <div className="py-10 text-center">
                                 <div className="text-5xl mb-2">🍃</div>
@@ -452,7 +473,7 @@ export default function OthersPage() {
 
                         <div ref={scrollRef} className="h-[65vh] overflow-y-auto overscroll-contain px-5 pb-5">
                             {loading ? (
-                                <div className="py-14 text-center text-stone-500 font-bold">Loading... ✨</div>
+                                <LoadingRows count={4} />
                             ) : rows.length === 0 ? (
                                 <div className="py-14 text-center">
                                     <div className="text-5xl mb-3">🧾</div>
@@ -461,30 +482,38 @@ export default function OthersPage() {
                                 </div>
                             ) : (
                                 <div className="space-y-3">
-                                    {rows.map((r) => (
-                                        <div
-                                            key={r.id}
-                                            className="rounded-3xl bg-white/70 border border-white shadow-sm p-4 flex items-start justify-between gap-3"
-                                        >
-                                            <div className="flex items-start gap-3 min-w-0">
-                                                <div className="w-12 h-12 rounded-2xl bg-rose-50 border border-rose-100 flex items-center justify-center shadow-sm">
-                                                    <span className="text-2xl">{emojiForCategory(r.category)}</span>
-                                                </div>
-
-                                                <div className="min-w-0">
-                                                    <div className="font-black text-stone-800 truncate">{r.category}</div>
-                                                    <div className="text-xs text-stone-500 font-bold truncate">
-                                                        {r.description ? r.description : 'No description'}
+                                    {rows.map((r) => {
+                                        const ownerLabel = r.owner_name || 'Partner'
+                                        return (
+                                            <div
+                                                key={r.id}
+                                                className="rounded-3xl bg-white/70 border border-white shadow-sm p-4 flex items-start justify-between gap-3"
+                                            >
+                                                <div className="flex items-start gap-3 min-w-0">
+                                                    <div className="w-12 h-12 rounded-2xl bg-rose-50 border border-rose-100 flex items-center justify-center shadow-sm shrink-0">
+                                                        <span className="text-2xl">{emojiForCategory(r.category)}</span>
                                                     </div>
-                                                    <div className="mt-1 text-[11px] text-stone-400 font-bold">{formatDate(r.spent_at)}</div>
+
+                                                    <div className="min-w-0">
+                                                        <div className="font-black text-stone-800 truncate">{r.category}</div>
+                                                        <div className="text-xs text-stone-500 font-bold truncate">
+                                                            {r.description ? r.description : 'No description'}
+                                                        </div>
+                                                        <div className="mt-1 flex flex-wrap items-center gap-1">
+                                                            <span className="text-[11px] text-stone-400 font-bold">{formatDate(r.spent_at)}</span>
+                                                            <span className="text-[10px] font-black text-sky-700 bg-sky-50 px-2 py-0.5 rounded-md border border-sky-100">
+                                                                {ownerLabel}
+                                                            </span>
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                <div className="text-right shrink-0">
+                                                    <div className="font-black text-stone-900">RM {Number(r.amount || 0).toFixed(2)}</div>
                                                 </div>
                                             </div>
-
-                                            <div className="text-right shrink-0">
-                                                <div className="font-black text-stone-900">RM {Number(r.amount || 0).toFixed(2)}</div>
-                                            </div>
-                                        </div>
-                                    ))}
+                                        )
+                                    })}
 
                                     {/* Sentinel MUST be inside scroll container */}
                                     <div ref={loadMoreRef} className="h-12 flex items-center justify-center">

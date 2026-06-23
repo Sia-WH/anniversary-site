@@ -34,6 +34,17 @@ export type FinanceTotals = {
     savingsWithdrawals: number
 }
 
+export type SharedExpenseTotalsInput = {
+    userId: string
+    partnerUserIds: string[]
+    expenses: AmountRow[]
+}
+
+export type SharedExpenseTotals = {
+    myExpenses: number
+    partnerExpenses: number
+}
+
 export const UNASSIGNED_SAVINGS_ACCOUNT_KEY = '__unassigned__'
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
@@ -84,6 +95,23 @@ export function calculateFinanceTotals(input: FinanceTotalsInput): FinanceTotals
         savingsDeposits,
         savingsWithdrawals,
     }
+}
+
+export function calculateSharedExpenseTotals(input: SharedExpenseTotalsInput): SharedExpenseTotals {
+    const partnerUserIds = new Set(input.partnerUserIds.filter(Boolean))
+
+    return input.expenses.reduce(
+        (totals, row) => {
+            if (row.user_id === input.userId) {
+                totals.myExpenses += amount(row.amount)
+            } else if (row.user_id && partnerUserIds.has(row.user_id)) {
+                totals.partnerExpenses += amount(row.amount)
+            }
+
+            return totals
+        },
+        { myExpenses: 0, partnerExpenses: 0 }
+    )
 }
 
 export function calculateSavingsBalance(

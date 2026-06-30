@@ -165,6 +165,32 @@ test('auto-decimal money input treats typed digits as cents', async () => {
     assert.equal(amountToMoneyDigits('0.01'), '1')
 })
 
+test('amount visibility state toggles one stable section without affecting others', async () => {
+    const { getAmountVisibilityStorageKey, toggleAmountVisibilityState } = await loadFinanceCalculations()
+
+    const incomeKey = getAmountVisibilityStorageKey('user-a', 'dashboard', 'my-income')
+    const expensesKey = getAmountVisibilityStorageKey('user-a', 'dashboard', 'my-expenses')
+    const trackerIncomeKey = getAmountVisibilityStorageKey('user-a', 'tracker', 'my-income')
+
+    assert.equal(incomeKey, 'finance-visibility:user-a:dashboard:my-income')
+    assert.equal(expensesKey, 'finance-visibility:user-a:dashboard:my-expenses')
+    assert.equal(trackerIncomeKey, 'finance-visibility:user-a:tracker:my-income')
+
+    const firstState = toggleAmountVisibilityState({}, incomeKey)
+    assert.equal(firstState[incomeKey], true)
+    assert.equal(firstState[expensesKey] ?? false, false)
+    assert.equal(firstState[trackerIncomeKey] ?? false, false)
+
+    const secondState = toggleAmountVisibilityState(firstState, expensesKey)
+    assert.equal(secondState[incomeKey], true)
+    assert.equal(secondState[expensesKey], true)
+    assert.equal(secondState[trackerIncomeKey] ?? false, false)
+
+    const thirdState = toggleAmountVisibilityState(secondState, incomeKey)
+    assert.equal(thirdState[incomeKey], false)
+    assert.equal(thirdState[expensesKey], true)
+})
+
 test('finance cache key separates scope filter and transaction type', async () => {
     const { createFinanceCacheKey } = await loadFinanceCalculations()
 

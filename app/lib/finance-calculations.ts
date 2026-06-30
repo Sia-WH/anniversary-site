@@ -141,6 +141,19 @@ export function formatMoneyDigitsForDisplay(value: string) {
     })}`
 }
 
+export type AmountVisibilityState = Record<string, boolean>
+
+export function getAmountVisibilityStorageKey(userId: string, surface: string, sectionKey: string) {
+    return `finance-visibility:${userId}:${surface}:${sectionKey}`
+}
+
+export function toggleAmountVisibilityState(state: AmountVisibilityState, storageKey: string): AmountVisibilityState {
+    return {
+        ...state,
+        [storageKey]: !Boolean(state[storageKey]),
+    }
+}
+
 export function calculateSavingsBalance(
     rows: SavingsAmountRow[],
     options: { userId?: string; accountId?: string | null; excludeTransactionId?: string | null } = {}

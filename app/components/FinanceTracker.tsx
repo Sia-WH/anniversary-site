@@ -10,10 +10,13 @@ import {
     createFinanceCacheKey,
     formatLocalDateForInput,
     formatMoneyDigitsForDisplay,
+    getAmountVisibilityStorageKey,
     getPaginationState,
     getAvailableBalanceForWithdrawal,
     moneyDigitsToAmount,
     normalizeMoneyDigits,
+    toggleAmountVisibilityState,
+    type AmountVisibilityState,
     type FinanceFilterMode,
     type FinanceScope,
     type FinanceTransactionType,
@@ -26,6 +29,26 @@ import AppShell from './AppShell'
 
 type TransactionKind = 'expense' | 'income' | 'savings'
 type FinanceSurface = 'dashboard' | 'tracker'
+type AmountVisibilitySectionKey =
+    | 'my-income'
+    | 'my-expenses'
+    | 'saved-from-income'
+    | 'cash-flow'
+    | 'net-savings'
+    | 'total-savings'
+    | 'shared-my-total'
+    | 'shared-partner-total'
+
+const AMOUNT_VISIBILITY_SECTIONS: AmountVisibilitySectionKey[] = [
+    'my-income',
+    'my-expenses',
+    'saved-from-income',
+    'cash-flow',
+    'net-savings',
+    'total-savings',
+    'shared-my-total',
+    'shared-partner-total',
+]
 
 type CategoryRow = {
     id: string
@@ -550,15 +573,15 @@ function SummaryCard({
     value,
     hint,
     tone,
-    amountsHidden,
-    onToggleAmounts,
+    amountHidden,
+    onToggleAmount,
 }: {
     label: string
     value: string
     hint: string
     tone: 'rose' | 'emerald' | 'amber' | 'sky' | 'stone'
-    amountsHidden: boolean
-    onToggleAmounts: () => void
+    amountHidden: boolean
+    onToggleAmount: () => void
 }) {
     const toneClass =
         tone === 'rose'
@@ -576,8 +599,8 @@ function SummaryCard({
             <p className="text-[10px] font-black uppercase tracking-widest opacity-70">{label}</p>
             <HideableAmount
                 value={value}
-                hidden={amountsHidden}
-                onToggle={onToggleAmounts}
+                hidden={amountHidden}
+                onToggle={onToggleAmount}
                 className="text-2xl"
             />
             <p className="mt-1 text-xs font-bold opacity-70">{hint}</p>
@@ -626,7 +649,7 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
     const [formType, setFormType] = useState<TransactionKind>('expense')
     const [editingTarget, setEditingTarget] = useState<UnifiedTransaction | null>(null)
     const [form, setForm] = useState<FormState>(() => initialFormState(formatLocalDateForInput(new Date())))
-    const [amountsHidden, setAmountsHidden] = useState(false)
+    const [amountVisibility, setAmountVisibility] = useState<AmountVisibilityState>({})
 
     const [deleteTarget, setDeleteTarget] = useState<UnifiedTransaction | null>(null)
 
@@ -1095,18 +1118,44 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
 
     useEffect(() => {
         if (!userId || typeof window === 'undefined') return
-        setAmountsHidden(window.localStorage.getItem(`finance:hide-amounts:${userId}`) === '1')
-    }, [userId])
 
-    const toggleAmountsHidden = useCallback(() => {
-        setAmountsHidden((current) => {
-            const next = !current
-            if (userId && typeof window !== 'undefined') {
-                window.localStorage.setItem(`finance:hide-amounts:${userId}`, next ? '1' : '0')
+        setAmountVisibility((current) => {
+            const next = { ...current }
+
+            for (const sectionKey of AMOUNT_VISIBILITY_SECTIONS) {
+                const storageKey = getAmountVisibilityStorageKey(userId, surface, sectionKey)
+                next[storageKey] = window.localStorage.getItem(storageKey) === '1'
             }
+
             return next
         })
-    }, [userId])
+    }, [surface, userId])
+
+    const isAmountHidden = useCallback(
+        (sectionKey: AmountVisibilitySectionKey) => {
+            if (!userId) return false
+            return Boolean(amountVisibility[getAmountVisibilityStorageKey(userId, surface, sectionKey)])
+        },
+        [amountVisibility, surface, userId]
+    )
+
+    const toggleAmountVisibility = useCallback(
+        (sectionKey: AmountVisibilitySectionKey) => {
+            if (!userId) return
+
+            const storageKey = getAmountVisibilityStorageKey(userId, surface, sectionKey)
+            setAmountVisibility((current) => {
+                const next = toggleAmountVisibilityState(current, storageKey)
+
+                if (typeof window !== 'undefined') {
+                    window.localStorage.setItem(storageKey, next[storageKey] ? '1' : '0')
+                }
+
+                return next
+            })
+        },
+        [surface, userId]
+    )
 
     const loadHistoryPage = useCallback(
         async (pageIndex: number) => {
@@ -2062,48 +2111,48 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                             value={`RM ${money(totals.income)}`}
                             hint="Personal this month"
                             tone="emerald"
-                            amountsHidden={amountsHidden}
-                            onToggleAmounts={toggleAmountsHidden}
+                            amountHidden={isAmountHidden('my-income')}
+                            onToggleAmount={() => toggleAmountVisibility('my-income')}
                         />
                         <SummaryCard
                             label="My Expenses"
                             value={`RM ${money(totals.expenses)}`}
                             hint="Personal this month"
                             tone="rose"
-                            amountsHidden={amountsHidden}
-                            onToggleAmounts={toggleAmountsHidden}
+                            amountHidden={isAmountHidden('my-expenses')}
+                            onToggleAmount={() => toggleAmountVisibility('my-expenses')}
                         />
                         <SummaryCard
                             label="Saved from Income"
                             value={`RM ${money(totals.savedFromIncome)}`}
                             hint="Reduces cash flow"
                             tone="sky"
-                            amountsHidden={amountsHidden}
-                            onToggleAmounts={toggleAmountsHidden}
+                            amountHidden={isAmountHidden('saved-from-income')}
+                            onToggleAmount={() => toggleAmountVisibility('saved-from-income')}
                         />
                         <SummaryCard
                             label="Cash Flow"
                             value={signedMoney(totals.cashFlow)}
                             hint="Income - expenses - saved income"
                             tone={totals.cashFlow >= 0 ? 'amber' : 'rose'}
-                            amountsHidden={amountsHidden}
-                            onToggleAmounts={toggleAmountsHidden}
+                            amountHidden={isAmountHidden('cash-flow')}
+                            onToggleAmount={() => toggleAmountVisibility('cash-flow')}
                         />
                         <SummaryCard
                             label="Net Savings"
                             value={signedMoney(totals.monthlySavings)}
                             hint="All sources, deposits - withdrawals"
                             tone="sky"
-                            amountsHidden={amountsHidden}
-                            onToggleAmounts={toggleAmountsHidden}
+                            amountHidden={isAmountHidden('net-savings')}
+                            onToggleAmount={() => toggleAmountVisibility('net-savings')}
                         />
                         <SummaryCard
                             label="Total Savings"
                             value={`RM ${money(totalSavingsBalance)}`}
                             hint={`${money(totals.savingsDeposits)} deposited, ${money(totals.savingsWithdrawals)} withdrawn`}
                             tone="stone"
-                            amountsHidden={amountsHidden}
-                            onToggleAmounts={toggleAmountsHidden}
+                            amountHidden={isAmountHidden('total-savings')}
+                            onToggleAmount={() => toggleAmountVisibility('total-savings')}
                         />
                     </section>
 
@@ -2120,8 +2169,8 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                                     <p className="text-[10px] font-black uppercase tracking-widest text-stone-400">My Total Expense</p>
                                     <HideableAmount
                                         value={`RM ${money(expenseScopeTotals.myExpenses)}`}
-                                        hidden={amountsHidden}
-                                        onToggle={toggleAmountsHidden}
+                                        hidden={isAmountHidden('shared-my-total')}
+                                        onToggle={() => toggleAmountVisibility('shared-my-total')}
                                         className="text-sm text-stone-800"
                                     />
                                 </div>
@@ -2131,8 +2180,8 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                                     </p>
                                     <HideableAmount
                                         value={`RM ${money(expenseScopeTotals.partnerExpenses)}`}
-                                        hidden={amountsHidden}
-                                        onToggle={toggleAmountsHidden}
+                                        hidden={isAmountHidden('shared-partner-total')}
+                                        onToggle={() => toggleAmountVisibility('shared-partner-total')}
                                         className="text-sm text-sky-800"
                                     />
                                 </div>

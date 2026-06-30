@@ -11,8 +11,11 @@ import {
     formatLocalDateForInput,
     formatMoneyDigitsForDisplay,
     getAmountVisibilityStorageKey,
+    getActiveCategoryLimits,
+    getHiddenCategoryLimits,
     getPaginationState,
     getAvailableBalanceForWithdrawal,
+    hasDuplicateCategoryLimit,
     moneyDigitsToAmount,
     normalizeMoneyDigits,
     toggleAmountVisibilityState,
@@ -654,6 +657,9 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
     const [deleteTarget, setDeleteTarget] = useState<UnifiedTransaction | null>(null)
 
     const [budgetOpen, setBudgetOpen] = useState(false)
+    const [budgetManageOpen, setBudgetManageOpen] = useState(false)
+    const [editingBudgetLimit, setEditingBudgetLimit] = useState<ExpenseLimitRow | null>(null)
+    const [budgetDeleteTarget, setBudgetDeleteTarget] = useState<ExpenseLimitRow | null>(null)
     const [budgetCategory, setBudgetCategory] = useState('')
     const [budgetNewCategory, setBudgetNewCategory] = useState('')
     const [budgetAmount, setBudgetAmount] = useState('')
@@ -848,8 +854,7 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                     supabase
                         .from('expense_category_limits')
                         .select('id, user_id, category_id, monthly_limit, is_active, expense_categories(id, name)')
-                        .eq('user_id', userId)
-                        .eq('is_active', true),
+                        .eq('user_id', userId),
                     scopedUserIds.length > 0
                         ? applyRange(
                             supabase
@@ -1372,7 +1377,7 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
     }, [dataScope, filterMode, historyFilter, loadHistoryPage, selectedDay, selectedMonth, selectedYear, userId])
 
     useEffect(() => {
-        const modalOpen = formOpen || Boolean(deleteTarget) || budgetOpen
+        const modalOpen = formOpen || Boolean(deleteTarget) || budgetOpen || budgetManageOpen || Boolean(budgetDeleteTarget)
         if (!modalOpen) return
 
         const previousOverflow = document.body.style.overflow
@@ -1381,7 +1386,7 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
         return () => {
             document.body.style.overflow = previousOverflow
         }
-    }, [budgetOpen, deleteTarget, formOpen])
+    }, [budgetDeleteTarget, budgetManageOpen, budgetOpen, deleteTarget, formOpen])
 
     useEffect(() => {
         if (isDashboard || !historyHasMore || historyLoading || historyLoadingMore) return
@@ -1503,6 +1508,9 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
         return filtered.slice(0, 5)
     }, [historyFilter, historyRows, isDashboard, unifiedTransactions])
 
+    const activeExpenseLimits = useMemo(() => getActiveCategoryLimits(expenseLimits), [expenseLimits])
+    const hiddenExpenseLimits = useMemo(() => getHiddenCategoryLimits(expenseLimits), [expenseLimits])
+
     const budgetComparisons = useMemo(() => {
         const spentByCategory = new Map<string, number>()
         const spentByName = new Map<string, number>()
@@ -1516,7 +1524,7 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
             spentByName.set(name, (spentByName.get(name) ?? 0) + row.amount)
         })
 
-        return expenseLimits.map((limit) => {
+        return activeExpenseLimits.map((limit) => {
             const spent =
                 spentByCategory.get(limit.category_id) ??
                 spentByName.get(normalizeName(limit.category_name).toLowerCase()) ??
@@ -1531,7 +1539,7 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                 progress: Math.min(100, Math.round((spent / Math.max(limit.monthly_limit, 1)) * 100)),
             }
         })
-    }, [expenseLimits, ownExpenseRows])
+    }, [activeExpenseLimits, ownExpenseRows])
 
     async function ensureExpenseCategory(name: string) {
         const normalized = normalizeName(name)
@@ -1869,6 +1877,7 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
     }
 
     function openBudgetModal(limit?: ExpenseLimitRow) {
+        setEditingBudgetLimit(limit ?? null)
         if (limit) {
             setBudgetCategory(limit.category_name)
             setBudgetNewCategory('')
@@ -1880,6 +1889,7 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
         }
 
         setErrorMsg(null)
+        setBudgetManageOpen(false)
         setBudgetOpen(true)
     }
 
@@ -1905,24 +1915,32 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
         try {
             const category = await ensureExpenseCategory(categoryName)
             const existing = expenseLimits.find((limit) => limit.category_id === category.id)
-            const payload = {
-                user_id: userId,
-                category_id: category.id,
-                monthly_limit: amount,
-                is_active: true,
+            if (editingBudgetLimit && hasDuplicateCategoryLimit(expenseLimits, category.id, editingBudgetLimit.id)) {
+                throw new Error('A limit for this category already exists. Edit or restore the existing limit instead.')
             }
 
-            const result = existing
+            const updatePayload = {
+                category_id: category.id,
+                monthly_limit: amount,
+                is_active: editingBudgetLimit ? editingBudgetLimit.is_active : true,
+            }
+            const targetLimitId = editingBudgetLimit?.id ?? existing?.id
+
+            const result = targetLimitId
                 ? await supabase
                     .from('expense_category_limits')
-                    .update(payload)
-                    .eq('id', existing.id)
+                    .update(updatePayload)
+                    .eq('id', targetLimitId)
                     .eq('user_id', userId)
-                : await supabase.from('expense_category_limits').insert(payload)
+                : await supabase.from('expense_category_limits').insert({
+                    user_id: userId,
+                    ...updatePayload,
+                })
 
             if (result.error) throw result.error
 
             setBudgetOpen(false)
+            setEditingBudgetLimit(null)
             await loadFinanceData({ force: true })
         } catch (error) {
             setErrorMsg(error instanceof Error ? error.message : 'Unable to save budget limit.')
@@ -1931,7 +1949,7 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
         }
     }
 
-    async function removeBudgetLimit(limit: ExpenseLimitRow) {
+    async function updateBudgetLimitVisibility(limit: ExpenseLimitRow, isActive: boolean) {
         if (!userId) return
 
         setSaving(true)
@@ -1940,17 +1958,100 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
         try {
             const { error } = await supabase
                 .from('expense_category_limits')
-                .update({ is_active: false })
+                .update({ is_active: isActive })
                 .eq('id', limit.id)
                 .eq('user_id', userId)
 
             if (error) throw error
             await loadFinanceData({ force: true })
         } catch (error) {
-            setErrorMsg(error instanceof Error ? error.message : 'Unable to remove budget limit.')
+            setErrorMsg(error instanceof Error ? error.message : 'Unable to update budget limit.')
         } finally {
             setSaving(false)
         }
+    }
+
+    async function deleteBudgetLimit() {
+        if (!userId || !budgetDeleteTarget) return
+
+        setSaving(true)
+        setErrorMsg(null)
+
+        try {
+            const { error } = await supabase
+                .from('expense_category_limits')
+                .delete()
+                .eq('id', budgetDeleteTarget.id)
+                .eq('user_id', userId)
+
+            if (error) throw error
+            setBudgetDeleteTarget(null)
+            await loadFinanceData({ force: true })
+        } catch (error) {
+            setErrorMsg(error instanceof Error ? error.message : 'Unable to delete budget limit.')
+        } finally {
+            setSaving(false)
+        }
+    }
+
+    function renderBudgetManageList(limits: ExpenseLimitRow[], emptyMessage: string, isHiddenList: boolean) {
+        if (limits.length === 0) {
+            return (
+                <div className="rounded-3xl bg-stone-50 p-4 text-sm font-bold text-stone-400">
+                    {emptyMessage}
+                </div>
+            )
+        }
+
+        return (
+            <div className="space-y-2">
+                {limits.map((limit) => (
+                    <div key={limit.id} className="rounded-3xl border border-stone-100 bg-stone-50 p-3">
+                        <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                                <p className="truncate text-sm font-black text-stone-800">{limit.category_name}</p>
+                                <p className="mt-1 text-xs font-bold text-stone-400">RM {money(limit.monthly_limit)} monthly limit</p>
+                                <p className="mt-1 text-[11px] font-bold text-stone-300">
+                                    {isHiddenList ? 'Hidden from dashboard. You can show it again.' : 'Visible on dashboard and tracker.'}
+                                </p>
+                            </div>
+                            <span
+                                className={`shrink-0 rounded-full px-3 py-1 text-[10px] font-black uppercase tracking-widest ${isHiddenList ? 'bg-stone-200 text-stone-500' : 'bg-emerald-100 text-emerald-700'
+                                    }`}
+                            >
+                                {isHiddenList ? 'Hidden' : 'Active'}
+                            </span>
+                        </div>
+                        <div className="mt-3 grid grid-cols-3 gap-2">
+                            <button
+                                type="button"
+                                onClick={() => openBudgetModal(limit)}
+                                disabled={saving}
+                                className="rounded-2xl bg-white py-3 text-xs font-black text-stone-600 shadow-sm disabled:opacity-50"
+                            >
+                                Edit
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => updateBudgetLimitVisibility(limit, isHiddenList)}
+                                disabled={saving}
+                                className="rounded-2xl bg-white py-3 text-xs font-black text-amber-700 shadow-sm disabled:opacity-50"
+                            >
+                                {isHiddenList ? 'Show again' : 'Hide'}
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setBudgetDeleteTarget(limit)}
+                                disabled={saving}
+                                className="rounded-2xl bg-white py-3 text-xs font-black text-red-500 shadow-sm disabled:opacity-50"
+                            >
+                                Delete
+                            </button>
+                        </div>
+                    </div>
+                ))}
+            </div>
+        )
     }
 
     const activeDateRange = buildFinanceDateRange({
@@ -2200,20 +2301,42 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                         <div className="flex items-center justify-between gap-3">
                             <div>
                                 <h2 className="text-lg font-black text-stone-800">Category Limits</h2>
-                                <p className="text-xs font-bold text-stone-400">Only categories with limits show here.</p>
+                                <p className="text-xs font-bold text-stone-400">Visible personal limits show here.</p>
                             </div>
-                            <button
-                                type="button"
-                                onClick={() => openBudgetModal()}
-                                className="rounded-2xl bg-amber-100 px-4 py-3 text-xs font-black text-amber-800 active:scale-95"
-                            >
-                                Set
-                            </button>
+                            <div className="flex shrink-0 gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => setBudgetManageOpen(true)}
+                                    className="rounded-2xl bg-stone-100 px-4 py-3 text-xs font-black text-stone-600 active:scale-95"
+                                >
+                                    Manage
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => openBudgetModal()}
+                                    className="rounded-2xl bg-amber-100 px-4 py-3 text-xs font-black text-amber-800 active:scale-95"
+                                >
+                                    Set
+                                </button>
+                            </div>
                         </div>
 
                         {budgetComparisons.length === 0 ? (
-                            <div className="rounded-3xl bg-stone-50 p-4 text-sm font-bold text-stone-400">
-                                No category limits yet. Add one for categories like Food or Transport.
+                            <div className="space-y-3 rounded-3xl bg-stone-50 p-4 text-sm font-bold text-stone-400">
+                                <p>
+                                    {hiddenExpenseLimits.length > 0
+                                        ? 'No visible category limits. Open Manage to show hidden limits again.'
+                                        : 'No category limits yet. Add one for categories like Food or Transport.'}
+                                </p>
+                                {hiddenExpenseLimits.length > 0 ? (
+                                    <button
+                                        type="button"
+                                        onClick={() => setBudgetManageOpen(true)}
+                                        className="rounded-2xl bg-white px-4 py-3 text-xs font-black text-stone-600 shadow-sm active:scale-95"
+                                    >
+                                        Manage Hidden Limits
+                                    </button>
+                                ) : null}
                             </div>
                         ) : (
                             <div className="space-y-3">
@@ -2232,13 +2355,23 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                                                     Spent RM {money(limit.spent)} / RM {money(limit.monthly_limit)}
                                                 </p>
                                             </div>
-                                            <button
-                                                type="button"
-                                                onClick={() => removeBudgetLimit(limit)}
-                                                className="rounded-full bg-white px-3 py-1 text-[11px] font-black text-stone-400"
-                                            >
-                                                Hide
-                                            </button>
+                                            <div className="flex shrink-0 flex-wrap justify-end gap-2">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => openBudgetModal(limit)}
+                                                    className="rounded-full bg-white px-3 py-1 text-[11px] font-black text-stone-500"
+                                                >
+                                                    Edit
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => updateBudgetLimitVisibility(limit, false)}
+                                                    disabled={saving}
+                                                    className="rounded-full bg-white px-3 py-1 text-[11px] font-black text-stone-400 disabled:opacity-50"
+                                                >
+                                                    Hide
+                                                </button>
+                                            </div>
                                         </div>
                                         <div className="mt-3 h-2 overflow-hidden rounded-full bg-white">
                                             <div
@@ -2647,12 +2780,23 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                         type="button"
                         className="absolute inset-0 bg-stone-900/30 backdrop-blur-sm"
                         aria-label="Close budget form"
-                        onClick={() => !saving && setBudgetOpen(false)}
+                        onClick={() => {
+                            if (saving) return
+                            setBudgetOpen(false)
+                            setEditingBudgetLimit(null)
+                        }}
                     />
                     <div className="relative w-full max-w-md rounded-[2rem] bg-white p-5 shadow-2xl">
                         <div className="mb-4">
                             <p className="text-xs font-black uppercase tracking-widest text-amber-500">Budget</p>
-                            <h3 className="text-2xl font-black text-stone-800">Monthly Category Limit</h3>
+                            <h3 className="text-2xl font-black text-stone-800">
+                                {editingBudgetLimit ? 'Edit Category Limit' : 'Monthly Category Limit'}
+                            </h3>
+                            <p className="mt-1 text-xs font-bold text-stone-400">
+                                {editingBudgetLimit
+                                    ? 'Change the category or monthly amount.'
+                                    : 'Set a personal monthly limit for one expense category.'}
+                            </p>
                         </div>
                         <div className="space-y-4">
                             <SmallSelect label="Expense category" value={budgetCategory} onChange={setBudgetCategory}>
@@ -2681,7 +2825,11 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                             <div className="flex gap-3 pt-2">
                                 <button
                                     type="button"
-                                    onClick={() => !saving && setBudgetOpen(false)}
+                                    onClick={() => {
+                                        if (saving) return
+                                        setBudgetOpen(false)
+                                        setEditingBudgetLimit(null)
+                                    }}
                                     disabled={saving}
                                     className="flex-1 rounded-2xl bg-stone-100 py-4 font-black text-stone-500 disabled:opacity-50"
                                 >
@@ -2693,9 +2841,102 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                                     disabled={saving}
                                     className="flex-1 rounded-2xl bg-amber-400 py-4 font-black text-stone-800 shadow-lg shadow-amber-100 disabled:opacity-50"
                                 >
-                                    {saving ? 'Saving...' : 'Save Limit'}
+                                    {saving ? 'Saving...' : editingBudgetLimit ? 'Save Changes' : 'Save Limit'}
                                 </button>
                             </div>
+                        </div>
+                    </div>
+                </div>
+            ) : null}
+
+            {budgetManageOpen ? (
+                <div className="fixed inset-0 z-[85] flex items-center justify-center p-4">
+                    <button
+                        type="button"
+                        className="absolute inset-0 bg-stone-900/30 backdrop-blur-sm"
+                        aria-label="Close limit manager"
+                        onClick={() => !saving && setBudgetManageOpen(false)}
+                    />
+                    <div className="relative max-h-[88vh] w-full max-w-lg overflow-y-auto rounded-[2rem] bg-white p-5 shadow-2xl">
+                        <div className="mb-4 flex items-start justify-between gap-3">
+                            <div>
+                                <p className="text-xs font-black uppercase tracking-widest text-amber-500">Manage</p>
+                                <h3 className="text-2xl font-black text-stone-800">Category Limits</h3>
+                                <p className="mt-1 text-xs font-bold text-stone-400">
+                                    Hide keeps a limit for later. Delete permanently removes only the limit record.
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => openBudgetModal()}
+                                disabled={saving}
+                                className="rounded-2xl bg-amber-100 px-4 py-3 text-xs font-black text-amber-800 disabled:opacity-50"
+                            >
+                                Add
+                            </button>
+                        </div>
+
+                        <div className="space-y-5">
+                            <section className="space-y-2">
+                                <h4 className="px-1 text-xs font-black uppercase tracking-widest text-emerald-600">
+                                    Active Limits
+                                </h4>
+                                {renderBudgetManageList(activeExpenseLimits, 'No active limits.', false)}
+                            </section>
+
+                            <section className="space-y-2">
+                                <h4 className="px-1 text-xs font-black uppercase tracking-widest text-stone-400">
+                                    Hidden Limits
+                                </h4>
+                                {renderBudgetManageList(hiddenExpenseLimits, 'No hidden limits.', true)}
+                            </section>
+
+                            <button
+                                type="button"
+                                onClick={() => !saving && setBudgetManageOpen(false)}
+                                disabled={saving}
+                                className="w-full rounded-2xl bg-stone-100 py-4 font-black text-stone-500 disabled:opacity-50"
+                            >
+                                Close
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            ) : null}
+
+            {budgetDeleteTarget ? (
+                <div className="fixed inset-0 z-[90] flex items-center justify-center p-4">
+                    <button
+                        type="button"
+                        className="absolute inset-0 bg-stone-900/35 backdrop-blur-sm"
+                        aria-label="Close limit delete confirmation"
+                        onClick={() => !saving && setBudgetDeleteTarget(null)}
+                    />
+                    <div className="relative w-full max-w-md rounded-[2rem] bg-white p-5 shadow-2xl">
+                        <p className="text-xs font-black uppercase tracking-widest text-red-400">Delete Limit</p>
+                        <h3 className="mt-1 text-2xl font-black text-stone-800">
+                            Delete {budgetDeleteTarget.category_name} limit?
+                        </h3>
+                        <p className="mt-2 text-sm font-bold leading-relaxed text-stone-500">
+                            This permanently removes the category limit only. The category and expense records will stay unchanged.
+                        </p>
+                        <div className="mt-5 flex gap-3">
+                            <button
+                                type="button"
+                                onClick={() => !saving && setBudgetDeleteTarget(null)}
+                                disabled={saving}
+                                className="flex-1 rounded-2xl bg-stone-100 py-4 font-black text-stone-500 disabled:opacity-50"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                onClick={deleteBudgetLimit}
+                                disabled={saving}
+                                className="flex-1 rounded-2xl bg-red-400 py-4 font-black text-white shadow-lg shadow-red-100 disabled:opacity-50"
+                            >
+                                {saving ? 'Deleting...' : 'Delete Limit'}
+                            </button>
                         </div>
                     </div>
                 </div>

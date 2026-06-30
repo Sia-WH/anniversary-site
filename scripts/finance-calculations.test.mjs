@@ -80,6 +80,31 @@ test('shared expense totals show zero when partner has no expenses', async () =>
     )
 })
 
+test('category limits keep hidden records manageable while showing only active limits', async () => {
+    const { getActiveCategoryLimits, getHiddenCategoryLimits } = await loadFinanceCalculations()
+
+    const limits = [
+        { id: 'limit-food', category_id: 'food', category_name: 'Food', monthly_limit: 800, is_active: true },
+        { id: 'limit-fitness', category_id: 'fitness', category_name: 'Fitness', monthly_limit: 200, is_active: false },
+    ]
+
+    assert.deepEqual(getActiveCategoryLimits(limits).map((limit) => limit.id), ['limit-food'])
+    assert.deepEqual(getHiddenCategoryLimits(limits).map((limit) => limit.id), ['limit-fitness'])
+})
+
+test('category limit duplicate check ignores the limit being edited', async () => {
+    const { hasDuplicateCategoryLimit } = await loadFinanceCalculations()
+
+    const limits = [
+        { id: 'limit-food', category_id: 'food', category_name: 'Food', monthly_limit: 800, is_active: true },
+        { id: 'limit-transport', category_id: 'transport', category_name: 'Transport', monthly_limit: 300, is_active: true },
+    ]
+
+    assert.equal(hasDuplicateCategoryLimit(limits, 'food'), true)
+    assert.equal(hasDuplicateCategoryLimit(limits, 'food', 'limit-food'), false)
+    assert.equal(hasDuplicateCategoryLimit(limits, 'transport', 'limit-food'), true)
+})
+
 test('savings balance is deposits minus withdrawals, grouped by account and never displayed below zero', async () => {
     const { calculateSavingsBalance, calculateSavingsAccountBalances } = await loadFinanceCalculations()
 

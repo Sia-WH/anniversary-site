@@ -45,6 +45,12 @@ export type SharedExpenseTotals = {
     partnerExpenses: number
 }
 
+export type CategoryLimitStateRow = {
+    id: string
+    category_id: string
+    is_active: boolean
+}
+
 export const UNASSIGNED_SAVINGS_ACCOUNT_KEY = '__unassigned__'
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
@@ -116,6 +122,22 @@ export function calculateSharedExpenseTotals(input: SharedExpenseTotalsInput): S
         },
         { myExpenses: 0, partnerExpenses: 0 }
     )
+}
+
+export function getActiveCategoryLimits<T extends CategoryLimitStateRow>(limits: T[]) {
+    return limits.filter((limit) => limit.is_active)
+}
+
+export function getHiddenCategoryLimits<T extends CategoryLimitStateRow>(limits: T[]) {
+    return limits.filter((limit) => !limit.is_active)
+}
+
+export function hasDuplicateCategoryLimit<T extends CategoryLimitStateRow>(
+    limits: T[],
+    categoryId: string,
+    editingLimitId?: string | null
+) {
+    return limits.some((limit) => limit.category_id === categoryId && limit.id !== editingLimitId)
 }
 
 export function normalizeMoneyDigits(value: string) {

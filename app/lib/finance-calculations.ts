@@ -52,6 +52,10 @@ function pad2(value: number | string) {
     return String(Number(value)).padStart(2, '0')
 }
 
+export function formatLocalDateForInput(date: Date) {
+    return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`
+}
+
 function amount(value: number) {
     return Number.isFinite(value) ? value : 0
 }
@@ -112,6 +116,29 @@ export function calculateSharedExpenseTotals(input: SharedExpenseTotalsInput): S
         },
         { myExpenses: 0, partnerExpenses: 0 }
     )
+}
+
+export function normalizeMoneyDigits(value: string) {
+    return value.replace(/\D/g, '').replace(/^0+(?=\d)/, '')
+}
+
+export function moneyDigitsToAmount(value: string) {
+    const digits = normalizeMoneyDigits(value)
+    if (!digits) return 0
+    return Number((Number(digits) / 100).toFixed(2))
+}
+
+export function amountToMoneyDigits(value: number | string) {
+    const parsed = Number(value)
+    if (!Number.isFinite(parsed) || parsed <= 0) return ''
+    return String(Math.round(parsed * 100))
+}
+
+export function formatMoneyDigitsForDisplay(value: string) {
+    return `RM ${moneyDigitsToAmount(value).toLocaleString('en-MY', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+    })}`
 }
 
 export function calculateSavingsBalance(

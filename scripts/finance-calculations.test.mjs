@@ -143,6 +143,28 @@ test('finance date ranges support day month year and all filters', async () => {
     })
 })
 
+test('local date formatter uses browser-local date parts for date inputs', async () => {
+    const { formatLocalDateForInput } = await loadFinanceCalculations()
+
+    assert.equal(formatLocalDateForInput(new Date(2026, 5, 30, 23, 59, 0)), '2026-06-30')
+    assert.equal(formatLocalDateForInput(new Date(2026, 0, 1, 0, 1, 0)), '2026-01-01')
+})
+
+test('auto-decimal money input treats typed digits as cents', async () => {
+    const { amountToMoneyDigits, formatMoneyDigitsForDisplay, moneyDigitsToAmount, normalizeMoneyDigits } =
+        await loadFinanceCalculations()
+
+    assert.equal(normalizeMoneyDigits('RM 12.3a4'), '1234')
+    assert.equal(moneyDigitsToAmount('1'), 0.01)
+    assert.equal(moneyDigitsToAmount('12'), 0.12)
+    assert.equal(moneyDigitsToAmount('123'), 1.23)
+    assert.equal(moneyDigitsToAmount('1234'), 12.34)
+    assert.equal(moneyDigitsToAmount('12345'), 123.45)
+    assert.equal(formatMoneyDigitsForDisplay('1234'), 'RM 12.34')
+    assert.equal(amountToMoneyDigits(12.34), '1234')
+    assert.equal(amountToMoneyDigits('0.01'), '1')
+})
+
 test('finance cache key separates scope filter and transaction type', async () => {
     const { createFinanceCacheKey } = await loadFinanceCalculations()
 

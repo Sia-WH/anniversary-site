@@ -1,14 +1,19 @@
 'use client'
 
 import {
+    amountToMoneyDigits,
     buildFinanceDateRange,
     calculateFinanceTotals,
     calculateSharedExpenseTotals,
     calculateSavingsAccountBalances,
     calculateSavingsBalance,
     createFinanceCacheKey,
+    formatLocalDateForInput,
+    formatMoneyDigitsForDisplay,
     getPaginationState,
     getAvailableBalanceForWithdrawal,
+    moneyDigitsToAmount,
+    normalizeMoneyDigits,
     type FinanceFilterMode,
     type FinanceScope,
     type FinanceTransactionType,
@@ -224,10 +229,6 @@ function pad2(n: number) {
     return String(n).padStart(2, '0')
 }
 
-function toISODate(date: Date) {
-    return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`
-}
-
 function normalizeName(value: string) {
     return value.trim().replace(/\s+/g, ' ')
 }
@@ -426,6 +427,91 @@ function SmallInput({
     )
 }
 
+function MoneyInput({
+    label,
+    value,
+    onChange,
+}: {
+    label: string
+    value: string
+    onChange: (value: string) => void
+}) {
+    return (
+        <label className="block min-w-0">
+            <span className="mb-1 block px-1 text-[10px] font-black uppercase tracking-widest text-stone-400">
+                {label}
+            </span>
+            <input
+                value={value ? formatMoneyDigitsForDisplay(value) : ''}
+                onChange={(event) => onChange(normalizeMoneyDigits(event.target.value))}
+                placeholder="RM 0.00"
+                type="text"
+                inputMode="numeric"
+                autoComplete="off"
+                className="w-full rounded-2xl border-2 border-stone-100 bg-white px-4 py-3 text-sm font-bold text-stone-700 shadow-sm outline-none transition placeholder:text-stone-300 focus:border-rose-300 focus:ring-4 focus:ring-rose-100"
+            />
+        </label>
+    )
+}
+
+function EyeIcon({ hidden }: { hidden: boolean }) {
+    return hidden ? (
+        <svg viewBox="0 0 24 24" aria-hidden="true" className="h-4 w-4">
+            <path
+                d="M3 3l18 18M10.6 10.7a2 2 0 0 0 2.7 2.7M7.5 7.8C5.7 8.8 4.2 10.3 3 12c2.2 3.2 5.2 5 9 5 1.2 0 2.3-.2 3.3-.6M13.8 5.2A9.4 9.4 0 0 0 12 5c-3.8 0-6.8 1.8-9 5 .6.9 1.4 1.8 2.2 2.5M17.8 8.1c1.2.9 2.3 2.2 3.2 3.9a11.8 11.8 0 0 1-2.3 2.7"
+                fill="none"
+                stroke="currentColor"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth="2"
+            />
+        </svg>
+    ) : (
+        <svg viewBox="0 0 24 24" aria-hidden="true" className="h-4 w-4">
+            <path
+                d="M3 12c2.2-3.2 5.2-5 9-5s6.8 1.8 9 5c-2.2 3.2-5.2 5-9 5s-6.8-1.8-9-5Z"
+                fill="none"
+                stroke="currentColor"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth="2"
+            />
+            <path
+                d="M12 14.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+            />
+        </svg>
+    )
+}
+
+function HideableAmount({
+    value,
+    hidden,
+    onToggle,
+    className = '',
+}: {
+    value: string
+    hidden: boolean
+    onToggle: () => void
+    className?: string
+}) {
+    return (
+        <div className="mt-2 flex min-w-0 items-center gap-2">
+            <p className={`break-words font-black leading-tight ${className}`}>{hidden ? 'RM ••••' : value}</p>
+            <button
+                type="button"
+                onClick={onToggle}
+                aria-label={hidden ? 'Show amount' : 'Hide amount'}
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white/50 text-current shadow-sm active:scale-95"
+            >
+                <EyeIcon hidden={hidden} />
+            </button>
+        </div>
+    )
+}
+
 function TypeButton({
     active,
     label,
@@ -464,11 +550,15 @@ function SummaryCard({
     value,
     hint,
     tone,
+    amountsHidden,
+    onToggleAmounts,
 }: {
     label: string
     value: string
     hint: string
     tone: 'rose' | 'emerald' | 'amber' | 'sky' | 'stone'
+    amountsHidden: boolean
+    onToggleAmounts: () => void
 }) {
     const toneClass =
         tone === 'rose'
@@ -484,7 +574,12 @@ function SummaryCard({
     return (
         <div className={`rounded-[1.75rem] bg-gradient-to-br p-4 shadow-sm ${toneClass}`}>
             <p className="text-[10px] font-black uppercase tracking-widest opacity-70">{label}</p>
-            <p className="mt-2 break-words text-2xl font-black leading-tight">{value}</p>
+            <HideableAmount
+                value={value}
+                hidden={amountsHidden}
+                onToggle={onToggleAmounts}
+                className="text-2xl"
+            />
             <p className="mt-1 text-xs font-bold opacity-70">{hint}</p>
         </div>
     )
@@ -530,7 +625,8 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
     const [formMode, setFormMode] = useState<'create' | 'edit'>('create')
     const [formType, setFormType] = useState<TransactionKind>('expense')
     const [editingTarget, setEditingTarget] = useState<UnifiedTransaction | null>(null)
-    const [form, setForm] = useState<FormState>(() => initialFormState(toISODate(now)))
+    const [form, setForm] = useState<FormState>(() => initialFormState(formatLocalDateForInput(new Date())))
+    const [amountsHidden, setAmountsHidden] = useState(false)
 
     const [deleteTarget, setDeleteTarget] = useState<UnifiedTransaction | null>(null)
 
@@ -996,6 +1092,21 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
         if (!userId) return
         loadFinanceData()
     }, [loadFinanceData, userId])
+
+    useEffect(() => {
+        if (!userId || typeof window === 'undefined') return
+        setAmountsHidden(window.localStorage.getItem(`finance:hide-amounts:${userId}`) === '1')
+    }, [userId])
+
+    const toggleAmountsHidden = useCallback(() => {
+        setAmountsHidden((current) => {
+            const next = !current
+            if (userId && typeof window !== 'undefined') {
+                window.localStorage.setItem(`finance:hide-amounts:${userId}`, next ? '1' : '0')
+            }
+            return next
+        })
+    }, [userId])
 
     const loadHistoryPage = useCallback(
         async (pageIndex: number) => {
@@ -1489,7 +1600,7 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
     }
 
     function openCreate(type: TransactionKind) {
-        const date = toISODate(new Date(Number(selectedYear), Number(selectedMonth) - 1, Math.min(now.getDate(), 28)))
+        const date = formatLocalDateForInput(new Date())
         setFormType(type)
         setFormMode('create')
         setEditingTarget(null)
@@ -1516,7 +1627,7 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
 
             setForm({
                 ...initialFormState(row.spent_at),
-                amount: String(row.amount),
+                amount: amountToMoneyDigits(row.amount),
                 category: known ? category : 'Others',
                 newCategory: known ? '' : category,
                 description: row.description ?? '',
@@ -1530,7 +1641,7 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
 
             setForm({
                 ...initialFormState(row.received_at),
-                amount: String(row.amount),
+                amount: amountToMoneyDigits(row.amount),
                 category: known ? category : 'Other',
                 newCategory: known ? '' : category,
                 description: row.description ?? '',
@@ -1539,7 +1650,7 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
             const row = transaction.source as SavingsTransactionRow
             setForm({
                 ...initialFormState(row.saved_at),
-                amount: String(row.amount),
+                amount: amountToMoneyDigits(row.amount),
                 accountId: row.account_id ?? '',
                 newAccount: row.account_id ? '' : row.account_name,
                 savingsType: row.type,
@@ -1554,7 +1665,7 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
     async function submitTransaction() {
         if (!userId) return
 
-        const amount = Number(form.amount)
+        const amount = moneyDigitsToAmount(form.amount)
         if (!Number.isFinite(amount) || amount <= 0) {
             setErrorMsg('Please enter a positive amount.')
             return
@@ -1951,36 +2062,48 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                             value={`RM ${money(totals.income)}`}
                             hint="Personal this month"
                             tone="emerald"
+                            amountsHidden={amountsHidden}
+                            onToggleAmounts={toggleAmountsHidden}
                         />
                         <SummaryCard
                             label="My Expenses"
                             value={`RM ${money(totals.expenses)}`}
                             hint="Personal this month"
                             tone="rose"
+                            amountsHidden={amountsHidden}
+                            onToggleAmounts={toggleAmountsHidden}
                         />
                         <SummaryCard
                             label="Saved from Income"
                             value={`RM ${money(totals.savedFromIncome)}`}
                             hint="Reduces cash flow"
                             tone="sky"
+                            amountsHidden={amountsHidden}
+                            onToggleAmounts={toggleAmountsHidden}
                         />
                         <SummaryCard
                             label="Cash Flow"
                             value={signedMoney(totals.cashFlow)}
                             hint="Income - expenses - saved income"
                             tone={totals.cashFlow >= 0 ? 'amber' : 'rose'}
+                            amountsHidden={amountsHidden}
+                            onToggleAmounts={toggleAmountsHidden}
                         />
                         <SummaryCard
                             label="Net Savings"
                             value={signedMoney(totals.monthlySavings)}
                             hint="All sources, deposits - withdrawals"
                             tone="sky"
+                            amountsHidden={amountsHidden}
+                            onToggleAmounts={toggleAmountsHidden}
                         />
                         <SummaryCard
                             label="Total Savings"
                             value={`RM ${money(totalSavingsBalance)}`}
                             hint={`${money(totals.savingsDeposits)} deposited, ${money(totals.savingsWithdrawals)} withdrawn`}
                             tone="stone"
+                            amountsHidden={amountsHidden}
+                            onToggleAmounts={toggleAmountsHidden}
                         />
                     </section>
 
@@ -1995,17 +2118,23 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                                 <div className="rounded-3xl bg-stone-50 p-3">
                                     <p className="text-[10px] font-black uppercase tracking-widest text-stone-400">My Total Expense</p>
-                                    <p className="mt-1 text-sm font-black text-stone-800">
-                                        RM {money(expenseScopeTotals.myExpenses)}
-                                    </p>
+                                    <HideableAmount
+                                        value={`RM ${money(expenseScopeTotals.myExpenses)}`}
+                                        hidden={amountsHidden}
+                                        onToggle={toggleAmountsHidden}
+                                        className="text-sm text-stone-800"
+                                    />
                                 </div>
                                 <div className="rounded-3xl bg-sky-50 p-3">
                                     <p className="truncate text-[10px] font-black uppercase tracking-widest text-sky-500">
                                         {partnerLabel} Total Expense
                                     </p>
-                                    <p className="mt-1 text-sm font-black text-sky-800">
-                                        RM {money(expenseScopeTotals.partnerExpenses)}
-                                    </p>
+                                    <HideableAmount
+                                        value={`RM ${money(expenseScopeTotals.partnerExpenses)}`}
+                                        hidden={amountsHidden}
+                                        onToggle={toggleAmountsHidden}
+                                        className="text-sm text-sky-800"
+                                    />
                                 </div>
                             </div>
                         </section>
@@ -2289,13 +2418,10 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                                 />
                             </div>
 
-                            <SmallInput
+                            <MoneyInput
                                 label="Amount (RM)"
                                 value={form.amount}
                                 onChange={(value) => updateForm({ amount: value })}
-                                placeholder="0.00"
-                                type="number"
-                                inputMode="decimal"
                             />
 
                             {formType === 'expense' ? (

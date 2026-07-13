@@ -232,7 +232,7 @@ test('finance cache key separates scope filter and transaction type', async () =
             transactionType: 'expense',
             page: 1,
         }),
-        'finance:v5:tracker:user-a:user-a,user-b:personal:expense:day:2026-06-23:p1'
+        'finance:v6:tracker:user-a:user-a,user-b:personal:expense:day:2026-06-23:p1'
     )
 
     assert.notEqual(
@@ -276,4 +276,196 @@ test('pagination metadata requests another page only after a full page', async (
         hasMore: false,
         nextPage: 3,
     })
+})
+
+test('monthly rollups add leftover, consume it, then carry uncovered overspend', async () => {
+    const { calculateMonthlyFinanceRollups } = await loadFinanceCalculations()
+    const rollups = calculateMonthlyFinanceRollups([
+        { month_start: '2026-01-01', income_total: 4000, expenses_total: 2500, savings_from_income_total: 1000 },
+        { month_start: '2026-02-01', income_total: 4000, expenses_total: 3300, savings_from_income_total: 1000 },
+        { month_start: '2026-03-01', income_total: 4000, expenses_total: 3600, savings_from_income_total: 1000 },
+    ], '2026-03-01')
+
+    assert.deepEqual(
+        rollups.map(({
+            month_start,
+            leftover_added,
+            leftover_used,
+            ending_leftover_balance,
+            overspend_created,
+            overspend_carried_out,
+        }) => ({
+            month_start,
+            leftover_added,
+            leftover_used,
+            ending_leftover_balance,
+            overspend_created,
+            overspend_carried_out,
+        })),
+        [
+            { month_start: '2026-01-01', leftover_added: 500, leftover_used: 0, ending_leftover_balance: 500, overspend_created: 0, overspend_carried_out: 0 },
+            { month_start: '2026-02-01', leftover_added: 0, leftover_used: 300, ending_leftover_balance: 200, overspend_created: 0, overspend_carried_out: 0 },
+            { month_start: '2026-03-01', leftover_added: 0, leftover_used: 200, ending_leftover_balance: 0, overspend_created: 400, overspend_carried_out: 400 },
+        ]
+    )
+})
+
+test('old overspend is paid before current expenses and historical changes recalculate following months', async () => {
+    const { calculateMonthlyFinanceRollups } = await loadFinanceCalculations()
+    const initial = calculateMonthlyFinanceRollups([
+        { month_start: '2026-01-01', income_total: 4000, expenses_total: 3800, savings_from_income_total: 1000 },
+        { month_start: '2026-02-01', income_total: 4000, expenses_total: 0, savings_from_income_total: 1000 },
+    ], '2026-02-01')
+
+    assert.equal(initial[0].overspend_carried_out, 800)
+    assert.equal(initial[1].overspend_paid, 800)
+    assert.equal(initial[1].available_after_overspend, 2200)
+
+    const recalculated = calculateMonthlyFinanceRollups([
+        { month_start: '2026-01-01', income_total: 5000, expenses_total: 3800, savings_from_income_total: 1000 },
+        { month_start: '2026-02-01', income_total: 4000, expenses_total: 0, savings_from_income_total: 1000 },
+    ], '2026-02-01')
+
+    assert.equal(recalculated[0].overspend_carried_out, 0)
+    assert.equal(recalculated[0].ending_leftover_balance, 200)
+    assert.equal(recalculated[1].overspend_carried_in, 0)
+})
+
+test('deficit continues across months without consuming other savings', async () => {
+    const { calculateMonthlyFinanceRollups } = await loadFinanceCalculations()
+    const rollups = calculateMonthlyFinanceRollups([
+        {
+            month_start: '2026-01-01',
+            income_total: 4000,
+            expenses_total: 3800,
+            savings_from_income_total: 1000,
+            savings_existing_money_total: 5000,
+        },
+        {
+            month_start: '2026-02-01',
+            income_total: 500,
+            expenses_total: 200,
+            savings_other_total: 9000,
+        },
+    ], '2026-02-01')
+
+    assert.equal(rollups[0].overspend_carried_out, 800)
+    assert.equal(rollups[1].overspend_paid, 500)
+    assert.equal(rollups[1].overspend_carried_out, 500)
+    assert.equal(rollups[1].ending_leftover_balance, 0)
+})
+
+test('rollups fill empty months and safely treat savings above income as a deficit', async () => {
+    const { calculateMonthlyFinanceRollups } = await loadFinanceCalculations()
+    const rollups = calculateMonthlyFinanceRollups([
+        { month_start: '2026-01-01', income_total: 100, savings_from_income_total: 200 },
+        { month_start: '2026-03-01', income_total: 500 },
+    ], '2026-03-01')
+
+    assert.deepEqual(rollups.map((row) => row.month_start), ['2026-01-01', '2026-02-01', '2026-03-01'])
+    assert.equal(rollups[0].ending_leftover_balance, 0)
+    assert.equal(rollups[0].overspend_created, 100)
+    assert.equal(rollups[1].overspend_carried_out, 100)
+    assert.equal(rollups[2].overspend_paid, 100)
+    assert.equal(rollups[2].ending_leftover_balance, 400)
+})
+
+test('period summaries add flows and use only the final month balances', async () => {
+    const { calculateMonthlyFinanceRollups, summarizeFinancePeriod } = await loadFinanceCalculations()
+    const rollups = calculateMonthlyFinanceRollups([
+        { month_start: '2025-12-01', income_total: 100, expenses_total: 50 },
+        { month_start: '2026-01-01', income_total: 4000, expenses_total: 2500, savings_from_income_total: 1000, manual_withdrawals_total: 50 },
+        { month_start: '2026-02-01', income_total: 4000, expenses_total: 3300, savings_from_income_total: 1000, savings_existing_money_total: 200 },
+    ], '2026-02-01')
+
+    const month = summarizeFinancePeriod(rollups, { mode: 'month', year: '2026', month: '2' })
+    assert.equal(month.income_total, 4000)
+    assert.equal(month.ending_leftover_balance, 250)
+
+    const year = summarizeFinancePeriod(rollups, { mode: 'year', year: '2026', month: 'all' })
+    assert.equal(year.income_total, 8000)
+    assert.equal(year.leftover_added, 500)
+    assert.equal(year.leftover_used, 300)
+    assert.equal(year.ending_leftover_balance, 250)
+
+    const all = summarizeFinancePeriod(rollups, { mode: 'all', year: 'all', month: 'all' })
+    assert.equal(all.income_total, 8100)
+    assert.equal(all.ending_leftover_balance, 250)
+})
+
+test('day summary uses the containing monthly state', async () => {
+    const { calculateMonthlyFinanceRollups, summarizeFinancePeriod } = await loadFinanceCalculations()
+    const rollups = calculateMonthlyFinanceRollups([
+        { month_start: '2026-06-01', income_total: 4000, expenses_total: 2500, savings_from_income_total: 1000 },
+    ], '2026-06-01')
+    const day = summarizeFinancePeriod(rollups, { mode: 'day', year: '2026', month: '6' })
+
+    assert.equal(day.context, 'monthly')
+    assert.equal(day.ending_leftover_balance, 500)
+})
+
+test('total savings deducts manual withdrawals once and never re-deducts leftover used', async () => {
+    const { calculateMonthlyFinanceRollups, summarizeFinancePeriod, calculateTotalSavings } =
+        await loadFinanceCalculations()
+    const rollups = calculateMonthlyFinanceRollups([
+        {
+            month_start: '2026-01-01',
+            income_total: 4000,
+            expenses_total: 2500,
+            savings_from_income_total: 1000,
+            savings_existing_money_total: 500,
+            savings_other_total: 200,
+            manual_withdrawals_total: 100,
+        },
+        { month_start: '2026-02-01', income_total: 4000, expenses_total: 3300, savings_from_income_total: 1000 },
+    ], '2026-02-01')
+    const summary = summarizeFinancePeriod(rollups, { mode: 'month', year: '2026', month: '2' })
+
+    assert.equal(summary.leftover_used, 300)
+    assert.equal(summary.ending_leftover_balance, 200)
+    assert.equal(calculateTotalSavings(summary), 2800)
+})
+
+test('cash flow display shows positive leftover, zero when leftover covers the gap, and negative overspend', async () => {
+    const { calculateMonthlyFinanceRollups, summarizeFinancePeriod, calculateCashFlowDisplay } =
+        await loadFinanceCalculations()
+    const rollups = calculateMonthlyFinanceRollups([
+        { month_start: '2026-01-01', income_total: 4000, expenses_total: 2500, savings_from_income_total: 1000 },
+        { month_start: '2026-02-01', income_total: 4000, expenses_total: 3300, savings_from_income_total: 1000 },
+        { month_start: '2026-03-01', income_total: 4000, expenses_total: 3600, savings_from_income_total: 1000 },
+    ], '2026-03-01')
+
+    assert.equal(
+        calculateCashFlowDisplay(summarizeFinancePeriod(rollups, { mode: 'month', year: '2026', month: '1' })),
+        500
+    )
+    assert.equal(
+        calculateCashFlowDisplay(summarizeFinancePeriod(rollups, { mode: 'month', year: '2026', month: '2' })),
+        0
+    )
+    assert.equal(
+        calculateCashFlowDisplay(summarizeFinancePeriod(rollups, { mode: 'month', year: '2026', month: '3' })),
+        -400
+    )
+})
+
+test('personal finance cards never appear as partner or combined calculations', async () => {
+    const { shouldShowPersonalFinanceCards } = await loadFinanceCalculations()
+
+    assert.equal(shouldShowPersonalFinanceCards('dashboard', 'combined'), true)
+    assert.equal(shouldShowPersonalFinanceCards('tracker', 'personal'), true)
+    assert.equal(shouldShowPersonalFinanceCards('tracker', 'partner'), false)
+    assert.equal(shouldShowPersonalFinanceCards('tracker', 'combined'), false)
+})
+
+test('monthly inputs SQL is authenticated read-only and idempotently indexed', () => {
+    const sql = readFileSync(join(process.cwd(), 'supabase/finance-monthly-inputs.sql'), 'utf8')
+
+    assert.match(sql, /finance_monthly_inputs\s*\(\s*\)/i)
+    assert.match(sql, /security invoker/i)
+    assert.match(sql, /select auth\.uid\(\)/i)
+    assert.doesNotMatch(sql, /target_user_id|insert\s+into|update\s+public\.|delete\s+from/i)
+    assert.equal((sql.match(/create index if not exists/gi) ?? []).length, 3)
+    assert.match(sql, /revoke execute on function public\.finance_monthly_inputs\(\) from public/i)
+    assert.match(sql, /grant execute on function public\.finance_monthly_inputs\(\) to authenticated/i)
 })

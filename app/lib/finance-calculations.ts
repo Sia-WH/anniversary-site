@@ -34,6 +34,38 @@ export type FinanceTotals = {
     savingsWithdrawals: number
 }
 
+export type MonthlyFinanceInput = {
+    month_start: string
+    income_total?: number
+    expenses_total?: number
+    savings_from_income_total?: number
+    savings_existing_money_total?: number
+    savings_other_total?: number
+    manual_withdrawals_total?: number
+}
+
+export type MonthlyFinanceRollup = Required<MonthlyFinanceInput> & {
+    usable_income_total: number
+    overspend_carried_in: number
+    overspend_paid: number
+    available_after_overspend: number
+    income_used_for_expenses: number
+    leftover_added: number
+    leftover_used: number
+    ending_leftover_balance: number
+    overspend_created: number
+    overspend_carried_out: number
+    cumulative_savings_from_income_total: number
+    cumulative_savings_existing_money_total: number
+    cumulative_savings_other_total: number
+    cumulative_manual_withdrawals_total: number
+}
+
+export type FinancePeriodSummary = Omit<MonthlyFinanceRollup, 'month_start'> & {
+    ending_month_start: string | null
+    context: 'period' | 'monthly'
+}
+
 export type SharedExpenseTotalsInput = {
     userId: string
     partnerUserIds: string[]
@@ -64,6 +96,31 @@ export function formatLocalDateForInput(date: Date) {
 
 function amount(value: number) {
     return Number.isFinite(value) ? value : 0
+}
+
+function toCents(value: number | undefined) {
+    return Math.max(0, Math.round(amount(value ?? 0) * 100))
+}
+
+function fromCents(value: number) {
+    return value / 100
+}
+
+function normalizeMonthStart(value: string) {
+    const match = /^(\d{4})-(\d{2})/.exec(value)
+    if (!match) return null
+
+    const month = Number(match[2])
+    if (month < 1 || month > 12) return null
+    return `${match[1]}-${match[2]}-01`
+}
+
+function nextMonthStart(value: string) {
+    const year = Number(value.slice(0, 4))
+    const month = Number(value.slice(5, 7))
+    const nextMonth = month === 12 ? 1 : month + 1
+    const nextYear = month === 12 ? year + 1 : year
+    return `${nextYear}-${pad2(nextMonth)}-01`
 }
 
 function belongsToUser(row: AmountRow, userId: string) {
@@ -105,6 +162,193 @@ export function calculateFinanceTotals(input: FinanceTotalsInput): FinanceTotals
         savingsDeposits,
         savingsWithdrawals,
     }
+}
+
+export function calculateMonthlyFinanceRollups(
+    inputs: MonthlyFinanceInput[],
+    throughMonth: string
+): MonthlyFinanceRollup[] {
+    const endCandidate = normalizeMonthStart(throughMonth)
+    if (!endCandidate) return []
+
+    const byMonth = new Map<string, Required<MonthlyFinanceInput>>()
+
+    inputs.forEach((input) => {
+        const monthStart = normalizeMonthStart(input.month_start)
+        if (!monthStart) return
+
+        const current = byMonth.get(monthStart) ?? {
+            month_start: monthStart,
+            income_total: 0,
+            expenses_total: 0,
+            savings_from_income_total: 0,
+            savings_existing_money_total: 0,
+            savings_other_total: 0,
+            manual_withdrawals_total: 0,
+        }
+
+        byMonth.set(monthStart, {
+            month_start: monthStart,
+            income_total: fromCents(toCents(current.income_total) + toCents(input.income_total)),
+            expenses_total: fromCents(toCents(current.expenses_total) + toCents(input.expenses_total)),
+            savings_from_income_total: fromCents(
+                toCents(current.savings_from_income_total) + toCents(input.savings_from_income_total)
+            ),
+            savings_existing_money_total: fromCents(
+                toCents(current.savings_existing_money_total) + toCents(input.savings_existing_money_total)
+            ),
+            savings_other_total: fromCents(
+                toCents(current.savings_other_total) + toCents(input.savings_other_total)
+            ),
+            manual_withdrawals_total: fromCents(
+                toCents(current.manual_withdrawals_total) + toCents(input.manual_withdrawals_total)
+            ),
+        })
+    })
+
+    const inputMonths = Array.from(byMonth.keys()).sort()
+    const startMonth = inputMonths[0] ?? endCandidate
+    const endMonth = inputMonths.at(-1) && inputMonths.at(-1)! > endCandidate ? inputMonths.at(-1)! : endCandidate
+    const rollups: MonthlyFinanceRollup[] = []
+    let previousLeftover = 0
+    let previousOverspend = 0
+    let cumulativeSavingsFromIncome = 0
+    let cumulativeSavingsExistingMoney = 0
+    let cumulativeSavingsOther = 0
+    let cumulativeManualWithdrawals = 0
+
+    for (let monthStart = startMonth; monthStart <= endMonth; monthStart = nextMonthStart(monthStart)) {
+        const input = byMonth.get(monthStart) ?? {
+            month_start: monthStart,
+            income_total: 0,
+            expenses_total: 0,
+            savings_from_income_total: 0,
+            savings_existing_money_total: 0,
+            savings_other_total: 0,
+            manual_withdrawals_total: 0,
+        }
+        const incomeTotal = toCents(input.income_total)
+        const expensesTotal = toCents(input.expenses_total)
+        const savingsFromIncomeTotal = toCents(input.savings_from_income_total)
+        const savingsExistingMoneyTotal = toCents(input.savings_existing_money_total)
+        const savingsOtherTotal = toCents(input.savings_other_total)
+        const manualWithdrawalsTotal = toCents(input.manual_withdrawals_total)
+        const usableIncome = incomeTotal - savingsFromIncomeTotal
+        let remainingIncome = Math.max(0, usableIncome)
+        const negativeUsableDeficit = Math.max(0, -usableIncome)
+        const overspendPaid = Math.min(remainingIncome, previousOverspend)
+        remainingIncome -= overspendPaid
+        const remainingOldOverspend = previousOverspend - overspendPaid
+        const availableAfterOverspend = remainingIncome
+        const incomeUsedForExpenses = Math.min(remainingIncome, expensesTotal)
+        remainingIncome -= incomeUsedForExpenses
+        const currentDeficit = negativeUsableDeficit + expensesTotal - incomeUsedForExpenses
+        const leftoverUsed = Math.min(previousLeftover, currentDeficit)
+        const overspendCreated = currentDeficit - leftoverUsed
+        const leftoverAdded = remainingOldOverspend === 0 ? remainingIncome : 0
+        const endingLeftover = Math.max(0, previousLeftover - leftoverUsed + leftoverAdded)
+        const overspendOut = remainingOldOverspend + overspendCreated
+
+        cumulativeSavingsFromIncome += savingsFromIncomeTotal
+        cumulativeSavingsExistingMoney += savingsExistingMoneyTotal
+        cumulativeSavingsOther += savingsOtherTotal
+        cumulativeManualWithdrawals += manualWithdrawalsTotal
+
+        rollups.push({
+            month_start: monthStart,
+            income_total: fromCents(incomeTotal),
+            expenses_total: fromCents(expensesTotal),
+            savings_from_income_total: fromCents(savingsFromIncomeTotal),
+            savings_existing_money_total: fromCents(savingsExistingMoneyTotal),
+            savings_other_total: fromCents(savingsOtherTotal),
+            manual_withdrawals_total: fromCents(manualWithdrawalsTotal),
+            usable_income_total: fromCents(usableIncome),
+            overspend_carried_in: fromCents(previousOverspend),
+            overspend_paid: fromCents(overspendPaid),
+            available_after_overspend: fromCents(availableAfterOverspend),
+            income_used_for_expenses: fromCents(incomeUsedForExpenses),
+            leftover_added: fromCents(leftoverAdded),
+            leftover_used: fromCents(leftoverUsed),
+            ending_leftover_balance: fromCents(endingLeftover),
+            overspend_created: fromCents(overspendCreated),
+            overspend_carried_out: fromCents(overspendOut),
+            cumulative_savings_from_income_total: fromCents(cumulativeSavingsFromIncome),
+            cumulative_savings_existing_money_total: fromCents(cumulativeSavingsExistingMoney),
+            cumulative_savings_other_total: fromCents(cumulativeSavingsOther),
+            cumulative_manual_withdrawals_total: fromCents(cumulativeManualWithdrawals),
+        })
+
+        previousLeftover = endingLeftover
+        previousOverspend = overspendOut
+    }
+
+    return rollups
+}
+
+export function summarizeFinancePeriod(
+    rollups: MonthlyFinanceRollup[],
+    filter: { mode: FinanceFilterMode; year: string; month: string }
+): FinancePeriodSummary {
+    const monthKey = `${filter.year}-${pad2(filter.month)}-01`
+    const selected = rollups.filter((rollup) => {
+        if (filter.mode === 'all') return true
+        if (filter.mode === 'year') return rollup.month_start.startsWith(`${filter.year}-`)
+        return rollup.month_start === monthKey
+    })
+    const first = selected[0]
+    const last = selected.at(-1)
+    const sum = (key: keyof MonthlyFinanceRollup) =>
+        selected.reduce((total, rollup) => total + Number(rollup[key]), 0)
+
+    return {
+        ending_month_start: last?.month_start ?? null,
+        context: filter.mode === 'day' ? 'monthly' : 'period',
+        income_total: sum('income_total'),
+        expenses_total: sum('expenses_total'),
+        savings_from_income_total: sum('savings_from_income_total'),
+        savings_existing_money_total: sum('savings_existing_money_total'),
+        savings_other_total: sum('savings_other_total'),
+        manual_withdrawals_total: sum('manual_withdrawals_total'),
+        usable_income_total: sum('usable_income_total'),
+        overspend_carried_in: first?.overspend_carried_in ?? 0,
+        overspend_paid: sum('overspend_paid'),
+        available_after_overspend: sum('available_after_overspend'),
+        income_used_for_expenses: sum('income_used_for_expenses'),
+        leftover_added: sum('leftover_added'),
+        leftover_used: sum('leftover_used'),
+        ending_leftover_balance: last?.ending_leftover_balance ?? 0,
+        overspend_created: sum('overspend_created'),
+        overspend_carried_out: last?.overspend_carried_out ?? 0,
+        cumulative_savings_from_income_total: last?.cumulative_savings_from_income_total ?? 0,
+        cumulative_savings_existing_money_total: last?.cumulative_savings_existing_money_total ?? 0,
+        cumulative_savings_other_total: last?.cumulative_savings_other_total ?? 0,
+        cumulative_manual_withdrawals_total: last?.cumulative_manual_withdrawals_total ?? 0,
+    }
+}
+
+export function calculateTotalSavings(summary: FinancePeriodSummary) {
+    return fromCents(
+        Math.max(
+            0,
+            toCents(summary.cumulative_savings_from_income_total) +
+                toCents(summary.cumulative_savings_existing_money_total) +
+                toCents(summary.cumulative_savings_other_total) +
+                toCents(summary.ending_leftover_balance) -
+                toCents(summary.cumulative_manual_withdrawals_total)
+        )
+    )
+}
+
+export function calculateCashFlowDisplay(summary: FinancePeriodSummary) {
+    if (summary.overspend_carried_out > 0) return -summary.overspend_carried_out
+    return fromCents(Math.max(0, toCents(summary.leftover_added) - toCents(summary.leftover_used)))
+}
+
+export function shouldShowPersonalFinanceCards(
+    surface: 'dashboard' | 'tracker',
+    scope: FinanceScope
+) {
+    return surface === 'dashboard' || scope === 'personal'
 }
 
 export function calculateSharedExpenseTotals(input: SharedExpenseTotalsInput): SharedExpenseTotals {
@@ -298,7 +542,7 @@ export function createFinanceCacheKey(input: {
                     : 'all'
     const pageKey = typeof input.page === 'number' ? `:p${input.page}` : ''
 
-    return `finance:v5:${input.surface}:${input.userId}:${visibleScope}:${input.scope}:${input.transactionType}:${input.mode}:${dateKey}${pageKey}`
+    return `finance:v6:${input.surface}:${input.userId}:${visibleScope}:${input.scope}:${input.transactionType}:${input.mode}:${dateKey}${pageKey}`
 }
 
 export function getPaginationState(input: { received: number; pageSize: number; page: number }) {

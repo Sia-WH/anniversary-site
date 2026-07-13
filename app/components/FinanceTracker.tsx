@@ -3,10 +3,12 @@
 import {
     amountToMoneyDigits,
     buildFinanceDateRange,
+    calculateCashFlowDisplay,
     calculateFinanceTotals,
+    calculateMonthlyFinanceRollups,
     calculateSharedExpenseTotals,
     calculateSavingsAccountBalances,
-    calculateSavingsBalance,
+    calculateTotalSavings,
     createFinanceCacheKey,
     formatLocalDateForInput,
     formatMoneyDigitsForDisplay,
@@ -18,11 +20,14 @@ import {
     hasDuplicateCategoryLimit,
     moneyDigitsToAmount,
     normalizeMoneyDigits,
+    shouldShowPersonalFinanceCards,
+    summarizeFinancePeriod,
     toggleAmountVisibilityState,
     type AmountVisibilityState,
     type FinanceFilterMode,
     type FinanceScope,
     type FinanceTransactionType,
+    type MonthlyFinanceInput,
     type SavingsAction,
     type SavingsSource,
 } from '@/app/lib/finance-calculations'
@@ -162,8 +167,8 @@ type FinanceSnapshot = {
     incomeRows: IncomeRow[]
     savingsRows: SavingsTransactionRow[]
     allSavingsRows: SavingsTransactionRow[]
+    monthlyInputs: MonthlyFinanceInput[]
     savingsAccountBalances: Record<string, number>
-    totalSavingsBalance: number
 }
 
 type DateSourceRow = {
@@ -229,6 +234,16 @@ type SavingsTransactionDbRow = {
     saved_at: unknown
     created_at: unknown
     savings_accounts?: unknown
+}
+
+type MonthlyFinanceInputDbRow = {
+    month_start: unknown
+    income_total: unknown
+    expenses_total: unknown
+    savings_from_income_total: unknown
+    savings_existing_money_total: unknown
+    savings_other_total: unknown
+    manual_withdrawals_total: unknown
 }
 
 type VisibleProfileDbRow = {
@@ -571,6 +586,11 @@ function TypeButton({
     )
 }
 
+type SummaryDetail = {
+    label: string
+    value: string
+}
+
 function SummaryCard({
     label,
     value,
@@ -578,6 +598,7 @@ function SummaryCard({
     tone,
     amountHidden,
     onToggleAmount,
+    details,
 }: {
     label: string
     value: string
@@ -585,6 +606,7 @@ function SummaryCard({
     tone: 'rose' | 'emerald' | 'amber' | 'sky' | 'stone'
     amountHidden: boolean
     onToggleAmount: () => void
+    details?: SummaryDetail[]
 }) {
     const toneClass =
         tone === 'rose'
@@ -607,6 +629,23 @@ function SummaryCard({
                 className="text-2xl"
             />
             <p className="mt-1 text-xs font-bold opacity-70">{hint}</p>
+            {details && details.length > 0 ? (
+                <details className="mt-3 border-t border-current/10 pt-2">
+                    <summary className="cursor-pointer select-none text-xs font-black opacity-75">
+                        View details
+                    </summary>
+                    <div className="mt-2 space-y-2">
+                        {details.map((detail) => (
+                            <div key={detail.label} className="flex items-start justify-between gap-2 text-xs font-bold">
+                                <span className="min-w-0 opacity-70">{detail.label}</span>
+                                <span className="shrink-0 font-black">
+                                    {amountHidden ? 'RM ••••' : detail.value}
+                                </span>
+                            </div>
+                        ))}
+                    </div>
+                </details>
+            ) : null}
         </div>
     )
 }
@@ -644,8 +683,8 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
     const [incomeRows, setIncomeRows] = useState<IncomeRow[]>([])
     const [savingsRows, setSavingsRows] = useState<SavingsTransactionRow[]>([])
     const [allSavingsRows, setAllSavingsRows] = useState<SavingsTransactionRow[]>([])
+    const [monthlyInputs, setMonthlyInputs] = useState<MonthlyFinanceInput[]>([])
     const [savingsAccountBalances, setSavingsAccountBalances] = useState<Record<string, number>>({})
-    const [totalSavingsBalance, setTotalSavingsBalance] = useState(0)
 
     const [formOpen, setFormOpen] = useState(false)
     const [formMode, setFormMode] = useState<'create' | 'edit'>('create')
@@ -701,8 +740,8 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
         setIncomeRows(snapshot.incomeRows)
         setSavingsRows(snapshot.savingsRows)
         setAllSavingsRows(snapshot.allSavingsRows)
+        setMonthlyInputs(snapshot.monthlyInputs ?? [])
         setSavingsAccountBalances(snapshot.savingsAccountBalances)
-        setTotalSavingsBalance(snapshot.totalSavingsBalance)
     }, [])
 
     const getScopedUserIds = useCallback(
@@ -815,6 +854,7 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                     incomeRowsRes,
                     savingsRowsRes,
                     savingsAllRowsRes,
+                    monthlyInputsRes,
                 ] = await Promise.all([
                     scopedUserIds.length > 0
                         ? supabase
@@ -903,6 +943,7 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                         .from('savings_transactions')
                         .select('id, user_id, account_id, amount, type, source, description, saved_at, created_at, savings_accounts(name)')
                         .eq('user_id', userId),
+                    supabase.rpc('finance_monthly_inputs'),
                 ])
 
                 const firstError = [
@@ -918,6 +959,7 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                     incomeRowsRes.error,
                     savingsRowsRes.error,
                     savingsAllRowsRes.error,
+                    monthlyInputsRes.error,
                 ].find(Boolean)
 
                 if (firstError) throw firstError
@@ -949,6 +991,7 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                 const monthlyIncomeRows = (incomeRowsRes.data ?? []) as IncomeDbRow[]
                 const monthlySavingsRows = (savingsRowsRes.data ?? []) as SavingsTransactionDbRow[]
                 const allSavingsTransactionRows = (savingsAllRowsRes.data ?? []) as SavingsTransactionDbRow[]
+                const monthlyInputRows = (monthlyInputsRes.data ?? []) as MonthlyFinanceInputDbRow[]
 
                 expenseMonthRows.forEach((row) => addMonth(row.spent_at))
                 incomeMonthRows.forEach((row) => addMonth(row.received_at))
@@ -978,7 +1021,6 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                     saved_at: String(row.saved_at),
                     created_at: row.created_at ? String(row.created_at) : null,
                 }))
-                const savingsBalance = calculateSavingsBalance(mappedAllSavingsRows, { userId })
                 const accountBalances = calculateSavingsAccountBalances(mappedAllSavingsRows, userId)
 
                 const nextSnapshot: Omit<FinanceSnapshot, 'savedAt'> = {
@@ -1057,8 +1099,16 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                         created_at: row.created_at ? String(row.created_at) : null,
                     })),
                     allSavingsRows: mappedAllSavingsRows,
+                    monthlyInputs: monthlyInputRows.map((row) => ({
+                        month_start: String(row.month_start),
+                        income_total: toNumber(row.income_total),
+                        expenses_total: toNumber(row.expenses_total),
+                        savings_from_income_total: toNumber(row.savings_from_income_total),
+                        savings_existing_money_total: toNumber(row.savings_existing_money_total),
+                        savings_other_total: toNumber(row.savings_other_total),
+                        manual_withdrawals_total: toNumber(row.manual_withdrawals_total),
+                    })),
                     savingsAccountBalances: accountBalances,
-                    totalSavingsBalance: savingsBalance,
                 }
 
                 if (seq !== loadSeqRef.current) return
@@ -1438,6 +1488,26 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
 
     const hasPartnerVisibility = partnerUserIds.length > 0
 
+    const currentMonthStart = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-01`
+    const monthlyRollups = useMemo(
+        () => calculateMonthlyFinanceRollups(monthlyInputs, currentMonthStart),
+        [currentMonthStart, monthlyInputs]
+    )
+    const periodSummary = useMemo(
+        () =>
+            summarizeFinancePeriod(monthlyRollups, {
+                mode: isDashboard ? 'month' : filterMode,
+                year: selectedYear,
+                month: selectedMonth,
+            }),
+        [filterMode, isDashboard, monthlyRollups, selectedMonth, selectedYear]
+    )
+    const showPersonalFinanceCards = shouldShowPersonalFinanceCards(surface, dataScope)
+    const scopedExpenseTotal = useMemo(
+        () => expenseRows.reduce((total, row) => total + row.amount, 0),
+        [expenseRows]
+    )
+
     const totals = useMemo(() => {
         if (!userId) {
             return {
@@ -1459,6 +1529,62 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
             savings: savingsRows,
         })
     }, [expenseRows, incomeRows, savingsRows, userId])
+
+    const incomeDetails = useMemo<SummaryDetail[]>(() => {
+        const totalsByCategory = new Map<string, number>()
+        incomeRows.forEach((row) => {
+            const category = normalizeName(row.category || 'Uncategorized')
+            totalsByCategory.set(category, (totalsByCategory.get(category) ?? 0) + row.amount)
+        })
+
+        return Array.from(totalsByCategory.entries())
+            .filter(([, value]) => value !== 0)
+            .sort((a, b) => b[1] - a[1])
+            .map(([label, value]) => ({ label, value: `RM ${money(value)}` }))
+    }, [incomeRows])
+
+    const totalSavingsDetails = useMemo<SummaryDetail[]>(() => {
+        const details = [
+            { label: 'From Income', value: periodSummary.cumulative_savings_from_income_total },
+            { label: 'Existing Money', value: periodSummary.cumulative_savings_existing_money_total },
+            { label: 'Other', value: periodSummary.cumulative_savings_other_total },
+            { label: 'Ending Leftover Balance', value: periodSummary.ending_leftover_balance },
+        ]
+            .filter((detail) => detail.value !== 0)
+            .map((detail) => ({ label: detail.label, value: `RM ${money(detail.value)}` }))
+
+        if (periodSummary.cumulative_manual_withdrawals_total !== 0) {
+            details.push({
+                label: 'Manual Withdrawals',
+                value: `-RM ${money(periodSummary.cumulative_manual_withdrawals_total)}`,
+            })
+        }
+
+        return details
+    }, [periodSummary])
+
+    const cashFlowDetails = useMemo<SummaryDetail[]>(() => {
+        const details = [
+            { label: 'Leftover Added', value: periodSummary.leftover_added, sign: 1 },
+            { label: 'Leftover Used', value: periodSummary.leftover_used, sign: -1 },
+            { label: 'Old Overspend Paid', value: periodSummary.overspend_paid, sign: -1 },
+            { label: 'Overspend Created', value: periodSummary.overspend_created, sign: -1 },
+            { label: 'Ending Leftover Balance', value: periodSummary.ending_leftover_balance, sign: 1 },
+            { label: 'Overspend Carried Out', value: periodSummary.overspend_carried_out, sign: -1 },
+        ]
+
+        return details
+            .filter((detail) => detail.value !== 0)
+            .map((detail) => ({
+                label: detail.label,
+                value: `${detail.sign < 0 ? '-' : ''}RM ${money(detail.value)}`,
+            }))
+    }, [periodSummary])
+
+    const selectedIncomeTotal = !isDashboard && filterMode === 'day' ? totals.income : periodSummary.income_total
+    const selectedTotalSavings = calculateTotalSavings(periodSummary)
+    const selectedCashFlow = calculateCashFlowDisplay(periodSummary)
+    const usesMonthlyContext = !isDashboard && filterMode === 'day'
 
     const unifiedTransactions = useMemo<UnifiedTransaction[]>(() => {
         const expenses = expenseRows.map((row) => ({
@@ -2206,55 +2332,55 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                         </div>
                     ) : null}
 
-                    <section className="grid grid-cols-2 gap-3">
-                        <SummaryCard
-                            label="My Income"
-                            value={`RM ${money(totals.income)}`}
-                            hint="Personal this month"
-                            tone="emerald"
-                            amountHidden={isAmountHidden('my-income')}
-                            onToggleAmount={() => toggleAmountVisibility('my-income')}
-                        />
-                        <SummaryCard
-                            label="My Expenses"
-                            value={`RM ${money(totals.expenses)}`}
-                            hint="Personal this month"
-                            tone="rose"
-                            amountHidden={isAmountHidden('my-expenses')}
-                            onToggleAmount={() => toggleAmountVisibility('my-expenses')}
-                        />
-                        <SummaryCard
-                            label="Saved from Income"
-                            value={`RM ${money(totals.savedFromIncome)}`}
-                            hint="Reduces cash flow"
-                            tone="sky"
-                            amountHidden={isAmountHidden('saved-from-income')}
-                            onToggleAmount={() => toggleAmountVisibility('saved-from-income')}
-                        />
-                        <SummaryCard
-                            label="Cash Flow"
-                            value={signedMoney(totals.cashFlow)}
-                            hint="Income - expenses - saved income"
-                            tone={totals.cashFlow >= 0 ? 'amber' : 'rose'}
-                            amountHidden={isAmountHidden('cash-flow')}
-                            onToggleAmount={() => toggleAmountVisibility('cash-flow')}
-                        />
-                        <SummaryCard
-                            label="Net Savings"
-                            value={signedMoney(totals.monthlySavings)}
-                            hint="All sources, deposits - withdrawals"
-                            tone="sky"
-                            amountHidden={isAmountHidden('net-savings')}
-                            onToggleAmount={() => toggleAmountVisibility('net-savings')}
-                        />
-                        <SummaryCard
-                            label="Total Savings"
-                            value={`RM ${money(totalSavingsBalance)}`}
-                            hint={`${money(totals.savingsDeposits)} deposited, ${money(totals.savingsWithdrawals)} withdrawn`}
-                            tone="stone"
-                            amountHidden={isAmountHidden('total-savings')}
-                            onToggleAmount={() => toggleAmountVisibility('total-savings')}
-                        />
+                    <section className={`grid gap-3 ${showPersonalFinanceCards ? 'grid-cols-2' : 'grid-cols-1'}`}>
+                        {showPersonalFinanceCards ? (
+                            <>
+                                <SummaryCard
+                                    label="My Income"
+                                    value={`RM ${money(selectedIncomeTotal)}`}
+                                    hint={usesMonthlyContext ? 'Selected day' : 'Personal selected period'}
+                                    tone="emerald"
+                                    amountHidden={isAmountHidden('my-income')}
+                                    onToggleAmount={() => toggleAmountVisibility('my-income')}
+                                    details={incomeDetails}
+                                />
+                                <SummaryCard
+                                    label="My Expenses"
+                                    value={`RM ${money(scopedExpenseTotal)}`}
+                                    hint={usesMonthlyContext ? 'Selected day' : 'Personal selected period'}
+                                    tone="rose"
+                                    amountHidden={isAmountHidden('my-expenses')}
+                                    onToggleAmount={() => toggleAmountVisibility('my-expenses')}
+                                />
+                                <SummaryCard
+                                    label="Total Savings"
+                                    value={`RM ${money(selectedTotalSavings)}`}
+                                    hint={usesMonthlyContext ? 'Monthly context' : 'Cumulative through ending month'}
+                                    tone="stone"
+                                    amountHidden={isAmountHidden('total-savings')}
+                                    onToggleAmount={() => toggleAmountVisibility('total-savings')}
+                                    details={totalSavingsDetails}
+                                />
+                                <SummaryCard
+                                    label="Cash Flow"
+                                    value={signedMoney(selectedCashFlow)}
+                                    hint={usesMonthlyContext ? 'Monthly context' : 'Selected period carry-forward'}
+                                    tone={selectedCashFlow >= 0 ? 'amber' : 'rose'}
+                                    amountHidden={isAmountHidden('cash-flow')}
+                                    onToggleAmount={() => toggleAmountVisibility('cash-flow')}
+                                    details={cashFlowDetails}
+                                />
+                            </>
+                        ) : (
+                            <SummaryCard
+                                label={dataScope === 'partner' ? `${partnerLabel} Expenses` : 'Combined Expenses'}
+                                value={`RM ${money(scopedExpenseTotal)}`}
+                                hint="Selected expense scope and period"
+                                tone="rose"
+                                amountHidden={isAmountHidden('my-expenses')}
+                                onToggleAmount={() => toggleAmountVisibility('my-expenses')}
+                            />
+                        )}
                     </section>
 
                     {!isDashboard && hasPartnerVisibility ? (

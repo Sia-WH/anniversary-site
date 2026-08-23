@@ -2,7 +2,9 @@
 
 import {
     amountToMoneyDigits,
+    aggregateCategorySpending,
     buildFinanceDateRange,
+    buildExpenseQuerySpec,
     calculateCashFlowDisplay,
     calculateFinanceTotals,
     calculateMonthlyFinanceRollups,
@@ -14,8 +16,11 @@ import {
     formatMoneyDigitsForDisplay,
     getAmountVisibilityStorageKey,
     getActiveCategoryLimits,
+    getCategoryLimitForMode,
     getHiddenCategoryLimits,
     getPaginationState,
+    getStableTransactionOrder,
+    compareFinanceTransactions,
     getAvailableBalanceForWithdrawal,
     hasDuplicateCategoryLimit,
     moneyDigitsToAmount,
@@ -24,6 +29,7 @@ import {
     summarizeFinancePeriod,
     toggleAmountVisibilityState,
     type AmountVisibilityState,
+    type ExpenseCategorySelection,
     type FinanceFilterMode,
     type FinanceScope,
     type FinanceTransactionType,
@@ -266,6 +272,18 @@ const SAVINGS_SOURCE_OPTIONS: Array<{ value: SavingsSource; label: string }> = [
     { value: 'other', label: 'Other' },
 ]
 
+function applyStableTransactionOrdering<T extends {
+    order: (column: string, options?: { ascending?: boolean; nullsFirst?: boolean }) => T
+}>(query: T, dateColumn: string) {
+    return getStableTransactionOrder(dateColumn).reduce(
+        (current, sort) => current.order(sort.column, {
+            ascending: sort.ascending,
+            nullsFirst: sort.nullsFirst,
+        }),
+        query
+    )
+}
+
 function pad2(n: number) {
     return String(n).padStart(2, '0')
 }
@@ -330,6 +348,10 @@ function cacheKey(input: {
     day: string
     transactionType?: FinanceTransactionType
     page?: number
+    search?: string
+    categories?: string[]
+    dating?: boolean
+    partner?: boolean
 }) {
     return createFinanceCacheKey({
         userId: input.userId,
@@ -342,6 +364,10 @@ function cacheKey(input: {
         day: input.day,
         transactionType: input.transactionType ?? 'all',
         page: input.page,
+        search: input.search,
+        categories: input.categories,
+        dating: input.dating,
+        partner: input.partner,
     })
 }
 
@@ -702,7 +728,12 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
     const [budgetCategory, setBudgetCategory] = useState('')
     const [budgetNewCategory, setBudgetNewCategory] = useState('')
     const [budgetAmount, setBudgetAmount] = useState('')
+    const [categoryLimitTab, setCategoryLimitTab] = useState<'limits' | 'actual'>('limits')
     const [historyFilter, setHistoryFilter] = useState<'all' | TransactionKind>('all')
+    const [descriptionSearch, setDescriptionSearch] = useState('')
+    const [selectedCategories, setSelectedCategories] = useState<ExpenseCategorySelection[]>([])
+    const [datingFilter, setDatingFilter] = useState(false)
+    const [partnerFilter, setPartnerFilter] = useState(false)
     const [historyRows, setHistoryRows] = useState<UnifiedTransaction[]>([])
     const [historyPage, setHistoryPage] = useState(0)
     const [historyHasMore, setHistoryHasMore] = useState(false)
@@ -718,6 +749,16 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
         () => mergeNames(DEFAULT_EXPENSE_CATEGORIES, expenseCategories),
         [expenseCategories]
     )
+    const expenseCategoryFilterOptions = useMemo<ExpenseCategorySelection[]>(() => {
+        const categoryIdsByName = new Map(
+            expenseCategories.map((category) => [normalizeName(category.name).toLowerCase(), category.id])
+        )
+
+        return expenseCategoryOptions.map((name) => ({
+            id: categoryIdsByName.get(normalizeName(name).toLowerCase()) ?? null,
+            name,
+        }))
+    }, [expenseCategories, expenseCategoryOptions])
     const incomeCategoryOptions = useMemo(
         () => mergeNames(DEFAULT_INCOME_CATEGORIES, incomeCategories),
         [incomeCategories]
@@ -861,20 +902,20 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                             .from('expenses')
                             .select('spent_at')
                             .in('user_id', scopedUserIds)
-                            .order('spent_at', { ascending: false })
+                            .order('spent_at', { ascending: false, nullsFirst: false })
                             .limit(MAX_MONTH_SOURCE_ROWS)
                         : emptyRows,
                     supabase
                         .from('incomes')
                         .select('received_at')
                         .eq('user_id', userId)
-                        .order('received_at', { ascending: false })
+                        .order('received_at', { ascending: false, nullsFirst: false })
                         .limit(MAX_MONTH_SOURCE_ROWS),
                     supabase
                         .from('savings_transactions')
                         .select('saved_at')
                         .eq('user_id', userId)
-                        .order('saved_at', { ascending: false })
+                        .order('saved_at', { ascending: false, nullsFirst: false })
                         .limit(MAX_MONTH_SOURCE_ROWS),
                     supabase
                         .from('expense_categories')
@@ -903,8 +944,9 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                                 .in('user_id', scopedUserIds),
                             'spent_at'
                         )
-                            .order('spent_at', { ascending: false })
-                            .order('created_at', { ascending: false })
+                            .order('spent_at', { ascending: false, nullsFirst: false })
+                            .order('created_at', { ascending: false, nullsFirst: false })
+                            .order('id', { ascending: false, nullsFirst: false })
                         : emptyRows,
                     !isDashboard && visibleUserIds.length > 0
                         ? applyRange(
@@ -914,8 +956,9 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                                 .in('user_id', visibleUserIds),
                             'spent_at'
                         )
-                            .order('spent_at', { ascending: false })
-                            .order('created_at', { ascending: false })
+                            .order('spent_at', { ascending: false, nullsFirst: false })
+                            .order('created_at', { ascending: false, nullsFirst: false })
+                            .order('id', { ascending: false, nullsFirst: false })
                         : emptyRows,
                     activeScope === 'personal'
                         ? applyRange(
@@ -925,8 +968,9 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                                 .eq('user_id', userId),
                             'received_at'
                         )
-                            .order('received_at', { ascending: false })
-                            .order('created_at', { ascending: false })
+                            .order('received_at', { ascending: false, nullsFirst: false })
+                            .order('created_at', { ascending: false, nullsFirst: false })
+                            .order('id', { ascending: false, nullsFirst: false })
                         : emptyRows,
                     activeScope === 'personal'
                         ? applyRange(
@@ -936,8 +980,9 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                                 .eq('user_id', userId),
                             'saved_at'
                         )
-                            .order('saved_at', { ascending: false })
-                            .order('created_at', { ascending: false })
+                            .order('saved_at', { ascending: false, nullsFirst: false })
+                            .order('created_at', { ascending: false, nullsFirst: false })
+                            .order('id', { ascending: false, nullsFirst: false })
                         : emptyRows,
                     supabase
                         .from('savings_transactions')
@@ -1246,60 +1291,71 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                     day: selectedDay,
                     transactionType: queryType,
                     page: pageIndex,
+                    search: descriptionSearch,
+                    categories: selectedCategories.map((category) => category.id ? `id:${category.id}` : `name:${category.name}`),
+                    dating: datingFilter,
+                    partner: partnerFilter,
                 })
 
                 if (typeof window !== 'undefined' && isFirstPage) {
                     window.localStorage.removeItem(historyCacheKey)
                 }
 
-                const applyDateRange = <T extends { gte: (column: string, value: string) => T; lt: (column: string, value: string) => T }>(
-                    query: T,
-                    column: string
-                ) => {
-                    if (range.startISO && range.endISO) return query.gte(column, range.startISO).lt(column, range.endISO)
-                    return query
-                }
-
                 const emptyRows = Promise.resolve({ data: [], error: null })
+                const expenseFilterSpec = buildExpenseQuerySpec({
+                    categories: selectedCategories,
+                    search: descriptionSearch,
+                    dating: datingFilter,
+                    partner: partnerFilter,
+                })
+                const hasExpenseOnlyFilters = expenseFilterSpec.hasExpenseOnlyFilters
                 const shouldLoadExpenses = queryType === 'all' || queryType === 'expense'
-                const shouldLoadIncome = activeScope === 'personal' && (queryType === 'all' || queryType === 'income')
-                const shouldLoadSavings = activeScope === 'personal' && (queryType === 'all' || queryType === 'savings')
+                const shouldLoadIncome =
+                    !hasExpenseOnlyFilters && activeScope === 'personal' && (queryType === 'all' || queryType === 'income')
+                const shouldLoadSavings =
+                    !hasExpenseOnlyFilters && activeScope === 'personal' && (queryType === 'all' || queryType === 'savings')
+
+                let expenseQuery = supabase
+                    .from('expenses')
+                    .select('id, user_id, amount, category, category_id, description, spent_at, created_at, is_dating, is_for_partner')
+                    .in('user_id', scopedUserIds)
+                if (range.startISO && range.endISO) {
+                    expenseQuery = expenseQuery.gte('spent_at', range.startISO).lt('spent_at', range.endISO)
+                }
+                if (expenseFilterSpec.searchPattern) expenseQuery = expenseQuery.ilike('description', expenseFilterSpec.searchPattern)
+                if (expenseFilterSpec.dating) expenseQuery = expenseQuery.eq('is_dating', true)
+                if (expenseFilterSpec.partner) expenseQuery = expenseQuery.eq('is_for_partner', true)
+                if (expenseFilterSpec.categoryOrFilter) expenseQuery = expenseQuery.or(expenseFilterSpec.categoryOrFilter)
+
+                let incomeQuery = supabase
+                    .from('incomes')
+                    .select('id, user_id, amount, category, category_id, description, received_at, created_at')
+                    .eq('user_id', userId)
+                if (range.startISO && range.endISO) {
+                    incomeQuery = incomeQuery.gte('received_at', range.startISO).lt('received_at', range.endISO)
+                }
+                if (expenseFilterSpec.searchPattern) incomeQuery = incomeQuery.ilike('description', expenseFilterSpec.searchPattern)
+
+                let savingsQuery = supabase
+                    .from('savings_transactions')
+                    .select('id, user_id, account_id, amount, type, source, description, saved_at, created_at, savings_accounts(name)')
+                    .eq('user_id', userId)
+                if (range.startISO && range.endISO) {
+                    savingsQuery = savingsQuery.gte('saved_at', range.startISO).lt('saved_at', range.endISO)
+                }
+                if (expenseFilterSpec.searchPattern) savingsQuery = savingsQuery.ilike('description', expenseFilterSpec.searchPattern)
 
                 const [expenseRes, incomeRes, savingsRes] = await Promise.all([
                     shouldLoadExpenses && scopedUserIds.length > 0
-                        ? applyDateRange(
-                            supabase
-                                .from('expenses')
-                                .select('id, user_id, amount, category, category_id, description, spent_at, created_at, is_dating, is_for_partner')
-                                .in('user_id', scopedUserIds),
-                            'spent_at'
-                        )
-                            .order('spent_at', { ascending: false })
-                            .order('created_at', { ascending: false })
+                        ? applyStableTransactionOrdering(expenseQuery, 'spent_at')
                             .range(0, cumulativeLimit - 1)
                         : emptyRows,
                     shouldLoadIncome
-                        ? applyDateRange(
-                            supabase
-                                .from('incomes')
-                                .select('id, user_id, amount, category, category_id, description, received_at, created_at')
-                                .eq('user_id', userId),
-                            'received_at'
-                        )
-                            .order('received_at', { ascending: false })
-                            .order('created_at', { ascending: false })
+                        ? applyStableTransactionOrdering(incomeQuery, 'received_at')
                             .range(0, cumulativeLimit - 1)
                         : emptyRows,
                     shouldLoadSavings
-                        ? applyDateRange(
-                            supabase
-                                .from('savings_transactions')
-                                .select('id, user_id, account_id, amount, type, source, description, saved_at, created_at, savings_accounts(name)')
-                                .eq('user_id', userId),
-                            'saved_at'
-                        )
-                            .order('saved_at', { ascending: false })
-                            .order('created_at', { ascending: false })
+                        ? applyStableTransactionOrdering(savingsQuery, 'saved_at')
                             .range(0, cumulativeLimit - 1)
                         : emptyRows,
                 ])
@@ -1371,10 +1427,7 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                     },
                 }))
 
-                const mergedRows = [...expenses, ...incomes, ...savings].sort((a, b) => {
-                    if (a.date !== b.date) return a.date < b.date ? 1 : -1
-                    return String(a.created_at ?? '') < String(b.created_at ?? '') ? 1 : -1
-                })
+                const mergedRows = [...expenses, ...incomes, ...savings].sort(compareFinanceTransactions)
                 const nextRows = mergedRows.slice(0, cumulativeLimit)
                 const tableMayHaveMore =
                     (expenseRes.data?.length ?? 0) >= cumulativeLimit ||
@@ -1406,6 +1459,10 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
             filterMode,
             getScopedUserIds,
             historyFilter,
+            descriptionSearch,
+            selectedCategories,
+            datingFilter,
+            partnerFilter,
             isDashboard,
             loadVisibleProfiles,
             selectedDay,
@@ -1563,27 +1620,34 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
         return details
     }, [periodSummary])
 
+    const selectedCashFlow = calculateCashFlowDisplay(periodSummary)
+
     const cashFlowDetails = useMemo<SummaryDetail[]>(() => {
         const details = [
-            { label: 'Leftover Added', value: periodSummary.leftover_added, sign: 1 },
-            { label: 'Leftover Used', value: periodSummary.leftover_used, sign: -1 },
-            { label: 'Old Overspend Paid', value: periodSummary.overspend_paid, sign: -1 },
-            { label: 'Overspend Created', value: periodSummary.overspend_created, sign: -1 },
-            { label: 'Ending Leftover Balance', value: periodSummary.ending_leftover_balance, sign: 1 },
-            { label: 'Overspend Carried Out', value: periodSummary.overspend_carried_out, sign: -1 },
+            { label: 'Income', value: periodSummary.income_total, sign: 1 },
+            { label: 'Expenses', value: periodSummary.expenses_total, sign: -1 },
+            { label: 'Saved From Income', value: periodSummary.savings_from_income_total, sign: -1 },
         ]
 
-        return details
+        const flowDetails = details
             .filter((detail) => detail.value !== 0)
             .map((detail) => ({
                 label: detail.label,
                 value: `${detail.sign < 0 ? '-' : ''}RM ${money(detail.value)}`,
             }))
-    }, [periodSummary])
+
+        if (selectedCashFlow !== 0) {
+            flowDetails.push({
+                label: selectedCashFlow > 0 ? 'Remaining' : 'Over by',
+                value: `RM ${money(Math.abs(selectedCashFlow))}`,
+            })
+        }
+
+        return flowDetails
+    }, [periodSummary, selectedCashFlow])
 
     const selectedIncomeTotal = !isDashboard && filterMode === 'day' ? totals.income : periodSummary.income_total
     const selectedTotalSavings = calculateTotalSavings(periodSummary)
-    const selectedCashFlow = calculateCashFlowDisplay(periodSummary)
     const usesMonthlyContext = !isDashboard && filterMode === 'day'
 
     const unifiedTransactions = useMemo<UnifiedTransaction[]>(() => {
@@ -1637,35 +1701,40 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
     const activeExpenseLimits = useMemo(() => getActiveCategoryLimits(expenseLimits), [expenseLimits])
     const hiddenExpenseLimits = useMemo(() => getHiddenCategoryLimits(expenseLimits), [expenseLimits])
 
+    const categorySpendings = useMemo(
+        () => aggregateCategorySpending(ownExpenseRows),
+        [ownExpenseRows]
+    )
+    const categoryLimitMode: FinanceFilterMode = isDashboard ? 'month' : filterMode
+
     const budgetComparisons = useMemo(() => {
-        const spentByCategory = new Map<string, number>()
-        const spentByName = new Map<string, number>()
-
-        ownExpenseRows.forEach((row) => {
-            if (row.category_id) {
-                spentByCategory.set(row.category_id, (spentByCategory.get(row.category_id) ?? 0) + row.amount)
-            }
-
-            const name = normalizeName(row.category || 'Uncategorized').toLowerCase()
-            spentByName.set(name, (spentByName.get(name) ?? 0) + row.amount)
-        })
+        const spentByCategory = new Map(
+            categorySpendings
+                .filter((row) => row.category_id)
+                .map((row) => [row.category_id as string, row.amount])
+        )
+        const spentByName = new Map(
+            categorySpendings.map((row) => [normalizeName(row.category).toLowerCase(), row.amount])
+        )
 
         return activeExpenseLimits.map((limit) => {
             const spent =
                 spentByCategory.get(limit.category_id) ??
                 spentByName.get(normalizeName(limit.category_name).toLowerCase()) ??
                 0
-            const remaining = limit.monthly_limit - spent
+            const limitAmount = getCategoryLimitForMode(limit.monthly_limit, categoryLimitMode)
+            const remaining = limitAmount - spent
 
             return {
                 ...limit,
                 spent,
+                limitAmount,
                 remaining,
                 isOver: remaining < 0,
-                progress: Math.min(100, Math.round((spent / Math.max(limit.monthly_limit, 1)) * 100)),
+                progress: Math.min(100, Math.round((spent / Math.max(limitAmount, 1)) * 100)),
             }
         })
-    }, [activeExpenseLimits, ownExpenseRows])
+    }, [activeExpenseLimits, categoryLimitMode, categorySpendings])
 
     async function ensureExpenseCategory(name: string) {
         const normalized = normalizeName(name)
@@ -2364,7 +2433,7 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                                 <SummaryCard
                                     label="Cash Flow"
                                     value={signedMoney(selectedCashFlow)}
-                                    hint={usesMonthlyContext ? 'Monthly context' : 'Selected period carry-forward'}
+                                    hint={usesMonthlyContext ? 'Containing month' : filterMode === 'year' ? 'Selected year total' : 'Selected period'}
                                     tone={selectedCashFlow >= 0 ? 'amber' : 'rose'}
                                     amountHidden={isAmountHidden('cash-flow')}
                                     onToggleAmount={() => toggleAmountVisibility('cash-flow')}
@@ -2447,7 +2516,40 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                             </div>
                         </div>
 
-                        {budgetComparisons.length === 0 ? (
+                        <div
+                            role="tablist"
+                            aria-label="Category spending views"
+                            className="grid grid-cols-2 gap-2 rounded-2xl bg-stone-50 p-1"
+                        >
+                            <button
+                                type="button"
+                                role="tab"
+                                aria-selected={categoryLimitTab === 'limits'}
+                                onClick={() => setCategoryLimitTab('limits')}
+                                className={`rounded-xl px-3 py-2 text-xs font-black transition ${categoryLimitTab === 'limits'
+                                    ? 'bg-white text-stone-800 shadow-sm'
+                                    : 'text-stone-400'
+                                    }`}
+                            >
+                                Limits
+                            </button>
+                            <button
+                                type="button"
+                                role="tab"
+                                aria-selected={categoryLimitTab === 'actual'}
+                                onClick={() => setCategoryLimitTab('actual')}
+                                className={`rounded-xl px-3 py-2 text-xs font-black transition ${categoryLimitTab === 'actual'
+                                    ? 'bg-white text-stone-800 shadow-sm'
+                                    : 'text-stone-400'
+                                    }`}
+                            >
+                                Actual Spend
+                            </button>
+                        </div>
+
+                        {categoryLimitTab === 'limits' ? (
+                            <>
+                            {budgetComparisons.length === 0 ? (
                             <div className="space-y-3 rounded-3xl bg-stone-50 p-4 text-sm font-bold text-stone-400">
                                 <p>
                                     {hiddenExpenseLimits.length > 0
@@ -2478,7 +2580,7 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                                             <div className="min-w-0">
                                                 <p className="font-black">{limit.category_name}</p>
                                                 <p className="mt-1 text-xs font-bold opacity-75">
-                                                    Spent RM {money(limit.spent)} / RM {money(limit.monthly_limit)}
+                                                    Spent RM {money(limit.spent)} / RM {money(limit.limitAmount)}
                                                 </p>
                                             </div>
                                             <div className="flex shrink-0 flex-wrap justify-end gap-2">
@@ -2510,6 +2612,27 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                                                 ? `Over by RM ${money(Math.abs(limit.remaining))}`
                                                 : `Remaining RM ${money(limit.remaining)}`}
                                         </p>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                            </>
+                        ) : categorySpendings.length === 0 ? (
+                            <div className="rounded-3xl bg-stone-50 p-4 text-sm font-bold text-stone-400">
+                                No expenses in the selected period.
+                            </div>
+                        ) : (
+                            <div className="space-y-2">
+                                {categorySpendings.map((spending) => (
+                                    <div
+                                        key={`${spending.category_id ?? 'name'}-${spending.category}`}
+                                        className="flex items-center justify-between gap-3 rounded-3xl bg-stone-50 p-4"
+                                    >
+                                        <div className="min-w-0">
+                                            <p className="truncate font-black text-stone-800">{spending.category}</p>
+                                            <p className="mt-1 text-xs font-bold text-stone-400">Actual spending in selected period</p>
+                                        </div>
+                                        <p className="shrink-0 text-sm font-black text-rose-600">RM {money(spending.amount)}</p>
                                     </div>
                                 ))}
                             </div>
@@ -2553,6 +2676,85 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                                         {kind}
                                     </button>
                                 ))}
+                            </div>
+                        ) : null}
+
+                        {!isDashboard ? (
+                            <div className="space-y-3 rounded-[2rem] bg-white p-3 shadow-sm">
+                                <SmallInput
+                                    label="Search description"
+                                    value={descriptionSearch}
+                                    onChange={setDescriptionSearch}
+                                    placeholder="Search notes..."
+                                />
+                                <div className="grid grid-cols-2 gap-2">
+                                    <button
+                                        type="button"
+                                        aria-pressed={datingFilter}
+                                        onClick={() => setDatingFilter((value) => !value)}
+                                        className={`rounded-2xl px-3 py-2 text-xs font-black transition ${datingFilter
+                                            ? 'bg-rose-400 text-white'
+                                            : 'bg-rose-50 text-rose-500'
+                                            }`}
+                                    >
+                                        Dating
+                                    </button>
+                                    <button
+                                        type="button"
+                                        aria-pressed={partnerFilter}
+                                        onClick={() => setPartnerFilter((value) => !value)}
+                                        className={`rounded-2xl px-3 py-2 text-xs font-black transition ${partnerFilter
+                                            ? 'bg-amber-400 text-white'
+                                            : 'bg-amber-50 text-amber-700'
+                                            }`}
+                                    >
+                                        Partner
+                                    </button>
+                                </div>
+                                <div>
+                                    <span className="mb-2 block px-1 text-[10px] font-black uppercase tracking-widest text-stone-400">
+                                        Categories · select any
+                                    </span>
+                                    <div className="flex flex-wrap gap-2">
+                                        {expenseCategoryFilterOptions.map((category) => {
+                                            const selected = selectedCategories.some(
+                                                (value) => value.id === category.id && value.name === category.name
+                                            )
+                                            return (
+                                                <button
+                                                    key={`${category.id ?? 'name'}-${category.name}`}
+                                                    type="button"
+                                                    aria-pressed={selected}
+                                                    onClick={() => {
+                                                        setSelectedCategories((current) => selected
+                                                            ? current.filter((value) => value.id !== category.id || value.name !== category.name)
+                                                            : [...current, category])
+                                                    }}
+                                                    className={`rounded-full px-3 py-2 text-xs font-black transition ${selected
+                                                        ? 'bg-stone-800 text-white'
+                                                        : 'bg-stone-50 text-stone-500'
+                                                        }`}
+                                                >
+                                                    {category.name}
+                                                </button>
+                                            )
+                                        })}
+                                    </div>
+                                </div>
+                                {descriptionSearch || selectedCategories.length > 0 || datingFilter || partnerFilter ? (
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setDescriptionSearch('')
+                                            setSelectedCategories([])
+                                            setDatingFilter(false)
+                                            setPartnerFilter(false)
+                                        }}
+                                        className="rounded-2xl bg-stone-100 px-4 py-2 text-xs font-black text-stone-600"
+                                    >
+                                        Clear filters
+                                    </button>
+                                ) : null}
                             </div>
                         ) : null}
 

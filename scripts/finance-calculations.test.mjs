@@ -426,7 +426,7 @@ test('total savings deducts manual withdrawals once and never re-deducts leftove
     assert.equal(calculateTotalSavings(summary), 2800)
 })
 
-test('cash flow display shows positive leftover, zero when leftover covers the gap, and negative overspend', async () => {
+test('cash flow display shows selected-period remaining, zero, and overspend without carry-forward', async () => {
     const { calculateMonthlyFinanceRollups, summarizeFinancePeriod, calculateCashFlowDisplay } =
         await loadFinanceCalculations()
     const rollups = calculateMonthlyFinanceRollups([
@@ -441,12 +441,173 @@ test('cash flow display shows positive leftover, zero when leftover covers the g
     )
     assert.equal(
         calculateCashFlowDisplay(summarizeFinancePeriod(rollups, { mode: 'month', year: '2026', month: '2' })),
-        0
+        -300
     )
     assert.equal(
         calculateCashFlowDisplay(summarizeFinancePeriod(rollups, { mode: 'month', year: '2026', month: '3' })),
-        -400
+        -600
     )
+})
+
+test('cash flow ignores prior-month leftover and overspend when showing the selected month', async () => {
+    const { calculateMonthlyFinanceRollups, summarizeFinancePeriod, calculateCashFlowDisplay } =
+        await loadFinanceCalculations()
+
+    const rollups = calculateMonthlyFinanceRollups([
+        { month_start: '2025-12-01', income_total: 100, expenses_total: 300 },
+        { month_start: '2026-01-01', income_total: 1000, expenses_total: 500 },
+    ], '2026-01-01')
+
+    assert.equal(
+        calculateCashFlowDisplay(summarizeFinancePeriod(rollups, { mode: 'month', year: '2026', month: '1' })),
+        500
+    )
+})
+
+test('year cash flow totals only the selected year and supports positive negative and zero results', async () => {
+    const { calculateMonthlyFinanceRollups, summarizeFinancePeriod, calculateCashFlowDisplay } =
+        await loadFinanceCalculations()
+
+    const cases = [
+        {
+            inputs: [
+                { month_start: '2025-12-01', income_total: 100, expenses_total: 300 },
+                { month_start: '2026-01-01', income_total: 1000, expenses_total: 500 },
+            ],
+            expected: 500,
+        },
+        {
+            inputs: [
+                { month_start: '2025-12-01', income_total: 100, expenses_total: 300 },
+                { month_start: '2026-01-01', income_total: 1000, expenses_total: 1200 },
+            ],
+            expected: -200,
+        },
+        {
+            inputs: [
+                { month_start: '2025-12-01', income_total: 100, expenses_total: 300 },
+                { month_start: '2026-01-01', income_total: 1000, expenses_total: 1000 },
+            ],
+            expected: 0,
+        },
+    ]
+
+    for (const { inputs, expected } of cases) {
+        const rollups = calculateMonthlyFinanceRollups(inputs, '2026-01-01')
+        assert.equal(
+            calculateCashFlowDisplay(summarizeFinancePeriod(rollups, { mode: 'year', year: '2026', month: 'all' })),
+            expected
+        )
+    }
+})
+
+test('year category limits use twelve times the monthly limit while month and all keep the monthly limit', async () => {
+    const { getCategoryLimitForMode } = await loadFinanceCalculations()
+
+    assert.equal(getCategoryLimitForMode(250, 'year'), 3000)
+    assert.equal(getCategoryLimitForMode(250, 'month'), 250)
+    assert.equal(getCategoryLimitForMode(250, 'all'), 250)
+})
+
+test('category spending prefers category id and falls back to normalized category name', async () => {
+    const { aggregateCategorySpending } = await loadFinanceCalculations()
+
+    assert.deepEqual(
+        aggregateCategorySpending([
+            { category_id: 'food-id', category: 'Food', amount: 10 },
+            { category_id: 'food-id', category: 'Food renamed', amount: 20 },
+            { category_id: null, category: '  Transport  ', amount: 5 },
+            { category_id: null, category: 'Transport', amount: 7 },
+        ]),
+        [
+            { category_id: 'food-id', category: 'Food', amount: 30 },
+            { category_id: null, category: 'Transport', amount: 12 },
+        ]
+    )
+})
+
+test('expense query specification builds exact id OR null-only name fallback, AND tags, and description search', async () => {
+    const { buildExpenseQuerySpec } = await loadFinanceCalculations()
+
+    assert.deepEqual(
+        buildExpenseQuerySpec({
+            categories: [
+                { id: 'food-id', name: 'Food' },
+                { id: 'other-food-id', name: 'Food' },
+                { id: null, name: 'Legacy, "OBrien"' },
+            ],
+            search: '  50% off  ',
+            dating: true,
+            partner: true,
+        }),
+        {
+            categoryIds: ['food-id', 'other-food-id'],
+            categoryNames: ['Food', 'Legacy, "OBrien"'],
+            categoryOrFilter: 'category_id.in.("food-id","other-food-id"),and(category_id.is.null,category.in.("Food","Legacy, \\"OBrien\\""))',
+            searchPattern: '%50\\% off%',
+            dating: true,
+            partner: true,
+            hasExpenseOnlyFilters: true,
+        }
+    )
+})
+
+test('description-only query keeps transaction type filters open', async () => {
+    const { buildExpenseQuerySpec } = await loadFinanceCalculations()
+
+    assert.deepEqual(buildExpenseQuerySpec({ search: 'dinner' }), {
+        categoryIds: [],
+        categoryNames: [],
+        categoryOrFilter: null,
+        searchPattern: '%dinner%',
+        dating: false,
+        partner: false,
+        hasExpenseOnlyFilters: false,
+    })
+})
+
+test('finance transaction pagination uses date then created_at then id as stable descending keys', async () => {
+    const { getStableTransactionOrder } = await loadFinanceCalculations()
+
+    assert.deepEqual(getStableTransactionOrder('spent_at'), [
+        { column: 'spent_at', ascending: false, nullsFirst: false },
+        { column: 'created_at', ascending: false, nullsFirst: false },
+        { column: 'id', ascending: false, nullsFirst: false },
+    ])
+    assert.deepEqual(getStableTransactionOrder('received_at'), [
+        { column: 'received_at', ascending: false, nullsFirst: false },
+        { column: 'created_at', ascending: false, nullsFirst: false },
+        { column: 'id', ascending: false, nullsFirst: false },
+    ])
+    assert.deepEqual(getStableTransactionOrder('saved_at'), [
+        { column: 'saved_at', ascending: false, nullsFirst: false },
+        { column: 'created_at', ascending: false, nullsFirst: false },
+        { column: 'id', ascending: false, nullsFirst: false },
+    ])
+})
+
+test('finance transaction comparator is deterministic for null timestamps and cumulative page expansion', async () => {
+    const { compareFinanceTransactions } = await loadFinanceCalculations()
+    const rows = [
+        { id: 'same-id', kind: 'savings', date: '2026-06-02', created_at: null },
+        { id: 'same-id', kind: 'income', date: '2026-06-02', created_at: null },
+        { id: 'older-id', kind: 'expense', date: '2026-06-02', created_at: null },
+        { id: 'created-id', kind: 'expense', date: '2026-06-02', created_at: '2026-06-02T00:00:01Z' },
+        { id: 'old-date', kind: 'expense', date: '2026-06-01', created_at: null },
+    ]
+    const key = (row) => `${row.id}:${row.kind}`
+    const expectedOrder = ['created-id:expense', 'same-id:income', 'same-id:savings', 'older-id:expense', 'old-date:expense']
+
+    const firstSort = [...rows].sort(compareFinanceTransactions).map(key)
+    const secondSort = [...rows].sort(compareFinanceTransactions).map(key)
+    assert.deepEqual(firstSort, expectedOrder)
+    assert.deepEqual(secondSort, expectedOrder)
+
+    const expandedSort = [
+        ...rows,
+        { id: 'oldest-id', kind: 'expense', date: '2026-05-31', created_at: null },
+    ].sort(compareFinanceTransactions).map(key)
+    assert.deepEqual(expandedSort.filter((rowKey) => expectedOrder.includes(rowKey)), expectedOrder)
 })
 
 test('personal finance cards never appear as partner or combined calculations', async () => {

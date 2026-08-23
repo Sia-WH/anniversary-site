@@ -83,6 +83,67 @@ export type CategoryLimitStateRow = {
     is_active: boolean
 }
 
+export type CategorySpendingRow = {
+    category_id: string | null
+    category: string | null
+    amount: number
+}
+
+export type ExpenseCategorySelection = {
+    id: string | null
+    name: string
+}
+
+export type ExpenseQuerySpec = {
+    categoryIds: string[]
+    categoryNames: string[]
+    categoryOrFilter: string | null
+    searchPattern: string | null
+    dating: boolean
+    partner: boolean
+    hasExpenseOnlyFilters: boolean
+}
+
+export type FinanceTransactionKind = 'expense' | 'income' | 'savings'
+
+export type FinanceTransactionSortRow = {
+    date: string
+    created_at: string | null
+    id: string
+    kind: FinanceTransactionKind
+}
+
+export function getStableTransactionOrder(dateColumn: string) {
+    return [
+        { column: dateColumn, ascending: false, nullsFirst: false },
+        { column: 'created_at', ascending: false, nullsFirst: false },
+        { column: 'id', ascending: false, nullsFirst: false },
+    ]
+}
+
+function compareNullableDescending(a: string | null, b: string | null) {
+    if (a === b) return 0
+    if (a === null) return 1
+    if (b === null) return -1
+    return a < b ? 1 : -1
+}
+
+export function compareFinanceTransactions(
+    a: FinanceTransactionSortRow,
+    b: FinanceTransactionSortRow
+) {
+    const dateOrder = compareNullableDescending(a.date, b.date)
+    if (dateOrder !== 0) return dateOrder
+
+    const createdAtOrder = compareNullableDescending(a.created_at, b.created_at)
+    if (createdAtOrder !== 0) return createdAtOrder
+
+    if (a.id !== b.id) return a.id < b.id ? 1 : -1
+
+    if (a.kind === b.kind) return 0
+    return a.kind < b.kind ? -1 : 1
+}
+
 export const UNASSIGNED_SAVINGS_ACCOUNT_KEY = '__unassigned__'
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
@@ -340,8 +401,11 @@ export function calculateTotalSavings(summary: FinancePeriodSummary) {
 }
 
 export function calculateCashFlowDisplay(summary: FinancePeriodSummary) {
-    if (summary.overspend_carried_out > 0) return -summary.overspend_carried_out
-    return fromCents(Math.max(0, toCents(summary.leftover_added) - toCents(summary.leftover_used)))
+    return fromCents(
+        toCents(summary.income_total) -
+            toCents(summary.expenses_total) -
+            toCents(summary.savings_from_income_total)
+    )
 }
 
 export function shouldShowPersonalFinanceCards(
@@ -382,6 +446,77 @@ export function hasDuplicateCategoryLimit<T extends CategoryLimitStateRow>(
     editingLimitId?: string | null
 ) {
     return limits.some((limit) => limit.category_id === categoryId && limit.id !== editingLimitId)
+}
+
+export function getCategoryLimitForMode(monthlyLimit: number, mode: FinanceFilterMode) {
+    const safeLimit = amount(monthlyLimit)
+    return mode === 'year' ? safeLimit * 12 : safeLimit
+}
+
+function normalizeCategoryName(value: string | null | undefined) {
+    return String(value ?? '').trim().replace(/\s+/g, ' ').toLowerCase()
+}
+
+export function aggregateCategorySpending<T extends CategorySpendingRow>(rows: T[]) {
+    const totals = new Map<string, { category_id: string | null; category: string; amount: number }>()
+
+    rows.forEach((row) => {
+        const categoryId = row.category_id ? String(row.category_id) : null
+        const categoryName = String(row.category ?? '').trim().replace(/\s+/g, ' ') || 'Uncategorized'
+        const key = categoryId ? `id:${categoryId}` : `name:${normalizeCategoryName(categoryName)}`
+        const current = totals.get(key)
+
+        totals.set(key, {
+            category_id: categoryId,
+            category: current?.category ?? categoryName,
+            amount: (current?.amount ?? 0) + amount(row.amount),
+        })
+    })
+
+    return Array.from(totals.values())
+        .sort((a, b) => b.amount - a.amount || a.category.localeCompare(b.category))
+        .map((row) => ({
+            category_id: row.category_id,
+            category: row.category,
+            amount: row.amount,
+        }))
+}
+
+function quotePostgrestValue(value: string) {
+    return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+}
+
+export function buildExpenseQuerySpec(input: {
+    categories?: ExpenseCategorySelection[]
+    search?: string
+    dating?: boolean
+    partner?: boolean
+}): ExpenseQuerySpec {
+    const selections = input.categories ?? []
+    const categoryIds = Array.from(new Set(selections.map((selection) => selection.id).filter(Boolean))) as string[]
+    const categoryNames = Array.from(
+        new Set(selections.map((selection) => selection.name.trim()).filter(Boolean))
+    )
+    const categoryClauses: string[] = [
+        categoryIds.length > 0 ? `category_id.in.(${categoryIds.map(quotePostgrestValue).join(',')})` : null,
+        categoryNames.length > 0
+            ? `and(category_id.is.null,category.in.(${categoryNames.map(quotePostgrestValue).join(',')}))`
+            : null,
+    ].filter((clause): clause is string => Boolean(clause))
+    const search = String(input.search ?? '').trim()
+    const escapedSearch = search.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_')
+    const dating = input.dating === true
+    const partner = input.partner === true
+
+    return {
+        categoryIds,
+        categoryNames,
+        categoryOrFilter: categoryClauses.length > 0 ? categoryClauses.join(',') : null,
+        searchPattern: escapedSearch ? `%${escapedSearch}%` : null,
+        dating,
+        partner,
+        hasExpenseOnlyFilters: categoryClauses.length > 0 || dating || partner,
+    }
 }
 
 export function normalizeMoneyDigits(value: string) {
@@ -528,6 +663,10 @@ export function createFinanceCacheKey(input: {
     day: string
     transactionType: FinanceTransactionType
     page?: number
+    search?: string
+    categories?: string[]
+    dating?: boolean
+    partner?: boolean
 }) {
     const visibleScope = Array.from(new Set([input.userId, ...input.visibleUserIds])).sort().join(',')
     const normalizedMonth = input.month === 'all' ? 'all' : pad2(input.month)
@@ -541,8 +680,18 @@ export function createFinanceCacheKey(input: {
                     ? input.year
                     : 'all'
     const pageKey = typeof input.page === 'number' ? `:p${input.page}` : ''
+    const hasFilterKey =
+        Boolean(input.search?.trim()) ||
+        Boolean(input.categories?.length) ||
+        Boolean(input.dating) ||
+        Boolean(input.partner)
+    const filterKey = hasFilterKey
+        ? `:f:${input.dating ? 'd1' : 'd0'}:${input.partner ? 'p1' : 'p0'}:${encodeURIComponent(
+            JSON.stringify(Array.from(new Set(input.categories ?? [])).sort())
+        )}:${encodeURIComponent(input.search?.trim().toLowerCase() || '-')}`
+        : ''
 
-    return `finance:v6:${input.surface}:${input.userId}:${visibleScope}:${input.scope}:${input.transactionType}:${input.mode}:${dateKey}${pageKey}`
+    return `finance:v6:${input.surface}:${input.userId}:${visibleScope}:${input.scope}:${input.transactionType}:${input.mode}:${dateKey}${pageKey}${filterKey}`
 }
 
 export function getPaginationState(input: { received: number; pageSize: number; page: number }) {

@@ -51,6 +51,61 @@ test('expense page cache key separates scope filters and page', async () => {
     )
 })
 
+test('finance cache key separates history search and category/tag filters', async () => {
+    const sourcePath = join(process.cwd(), 'app/lib/finance-calculations.ts')
+    const source = readFileSync(sourcePath, 'utf8')
+    const transpiled = ts.transpileModule(source, {
+        compilerOptions: {
+            module: ts.ModuleKind.ES2022,
+            target: ts.ScriptTarget.ES2020,
+        },
+    }).outputText
+    const moduleUrl = `data:text/javascript;base64,${Buffer.from(transpiled).toString('base64')}`
+    const { createFinanceCacheKey } = await import(moduleUrl)
+
+    const base = {
+        userId: 'user-a',
+        visibleUserIds: ['user-a', 'user-b'],
+        surface: 'tracker',
+        scope: 'personal',
+        mode: 'month',
+        year: '2026',
+        month: '6',
+        day: 'all',
+        transactionType: 'expense',
+        page: 0,
+    }
+
+    assert.notEqual(
+        createFinanceCacheKey({ ...base, search: 'dinner' }),
+        createFinanceCacheKey({ ...base, search: 'transport' })
+    )
+    assert.notEqual(
+        createFinanceCacheKey({ ...base, categories: ['Food'] }),
+        createFinanceCacheKey({ ...base, categories: ['Transport'] })
+    )
+    assert.notEqual(
+        createFinanceCacheKey({ ...base, dating: true }),
+        createFinanceCacheKey({ ...base, partner: true })
+    )
+    assert.notEqual(
+        createFinanceCacheKey({ ...base, categories: ['a,b'] }),
+        createFinanceCacheKey({ ...base, categories: ['a', 'b'] })
+    )
+})
+
+test('finance filter controls expose tab and pressed-state semantics', () => {
+    const source = readFileSync(join(process.cwd(), 'app/components/FinanceTracker.tsx'), 'utf8')
+
+    assert.match(source, /role="tablist"/)
+    assert.match(source, /role="tab"/)
+    assert.match(source, /aria-selected=\{categoryLimitTab === 'limits'\}/)
+    assert.match(source, /aria-selected=\{categoryLimitTab === 'actual'\}/)
+    assert.match(source, /aria-pressed=\{datingFilter\}/)
+    assert.match(source, /aria-pressed=\{partnerFilter\}/)
+    assert.match(source, /aria-pressed=\{selected\}/)
+})
+
 test('merge unique expense rows avoids duplicate pagination records', async () => {
     const { mergeUniqueExpenseRows } = await loadExpensePageCache()
 

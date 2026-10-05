@@ -2,6 +2,7 @@
 
 import { createBrowserClient } from '@supabase/ssr'
 import { useRouter } from 'next/navigation'
+import Link from 'next/link'
 import { useMemo, useState } from 'react'
 
 export default function LoginPage() {
@@ -146,6 +147,10 @@ export default function LoginPage() {
                 >
                     {loading ? 'Logging in...' : 'Login'}
                 </button>
+
+                <Link href="/forgot-password" className="mt-4 block text-center text-sm text-pink-600 hover:underline">
+                    Forgot password?
+                </Link>
 
             </div>
         </main>

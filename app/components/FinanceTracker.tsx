@@ -40,6 +40,7 @@ import {
 import { supabaseBrowser } from '@/app/lib/supabase-browser'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import AppShell from './AppShell'
+import PendingTransactionsInbox from './PendingTransactionsInbox'
 
 type TransactionKind = 'expense' | 'income' | 'savings'
 type FinanceSurface = 'dashboard' | 'tracker'
@@ -2643,6 +2644,16 @@ export default function FinanceTracker({ surface = 'tracker' }: { surface?: Fina
                             Budget limits are personal only and are hidden for partner / combined history views.
                         </section>
                     )}
+
+                    {!isDashboard ? (
+                        <PendingTransactionsInbox
+                            categories={expenseCategories}
+                            onConfirmed={async () => {
+                                await loadFinanceData({ force: true })
+                                await loadHistoryPage(0)
+                            }}
+                        />
+                    ) : null}
 
                     <section className="space-y-3">
                         <div className="flex items-center justify-between gap-3 px-1">
